@@ -16,6 +16,9 @@ package io.prestosql.plugin.hive.metastore;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.prestosql.plugin.hive.metastore.alluxio.AlluxioMetastoreModule;
+import io.prestosql.plugin.hive.metastore.cache.CachingHiveMetastoreModule;
+import io.prestosql.plugin.hive.metastore.cache.ForCachingHiveMetastore;
 import io.prestosql.plugin.hive.metastore.file.FileMetastoreModule;
 import io.prestosql.plugin.hive.metastore.glue.GlueMetastoreModule;
 import io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreModule;
@@ -38,19 +41,21 @@ public class HiveMetastoreModule
     protected void setup(Binder binder)
     {
         if (metastore.isPresent()) {
-            binder.bind(HiveMetastore.class).toInstance(metastore.get());
+            binder.bind(HiveMetastore.class).annotatedWith(ForCachingHiveMetastore.class).toInstance(metastore.get());
+            install(new CachingHiveMetastoreModule());
         }
         else {
             bindMetastoreModule("thrift", new ThriftMetastoreModule());
             bindMetastoreModule("file", new FileMetastoreModule());
             bindMetastoreModule("glue", new GlueMetastoreModule());
+            bindMetastoreModule("alluxio", new AlluxioMetastoreModule());
         }
     }
 
     private void bindMetastoreModule(String name, Module module)
     {
         install(installModuleIf(
-                MetastoreConfig.class,
+                MetastoreTypeConfig.class,
                 metastore -> name.equalsIgnoreCase(metastore.getMetastoreType()),
                 module));
     }

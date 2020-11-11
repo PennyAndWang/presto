@@ -66,9 +66,19 @@ public interface WorkProcessor<T>
         return WorkProcessorUtils.yielding(this, yieldSignal);
     }
 
-    default WorkProcessor<T> withProcessStateMonitor(Consumer<ProcessState<? extends T>> monitor)
+    default WorkProcessor<T> withProcessEntryMonitor(Runnable monitor)
+    {
+        return WorkProcessorUtils.processEntryMonitor(this, monitor);
+    }
+
+    default WorkProcessor<T> withProcessStateMonitor(Consumer<ProcessState<T>> monitor)
     {
         return WorkProcessorUtils.processStateMonitor(this, monitor);
+    }
+
+    default WorkProcessor<T> finishWhen(BooleanSupplier finishSignal)
+    {
+        return WorkProcessorUtils.finishWhen(this, finishSignal);
     }
 
     default <R> WorkProcessor<R> flatMap(Function<T, WorkProcessor<R>> mapper)

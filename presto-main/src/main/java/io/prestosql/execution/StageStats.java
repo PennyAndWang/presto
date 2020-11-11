@@ -32,6 +32,7 @@ import java.util.OptionalDouble;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.prestosql.execution.StageState.FLUSHING;
 import static io.prestosql.execution.StageState.RUNNING;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
@@ -68,6 +69,7 @@ public class StageStats
 
     private final DataSize physicalInputDataSize;
     private final long physicalInputPositions;
+    private final Duration physicalInputReadTime;
 
     private final DataSize internalNetworkInputDataSize;
     private final long internalNetworkInputPositions;
@@ -119,6 +121,7 @@ public class StageStats
 
             @JsonProperty("physicalInputDataSize") DataSize physicalInputDataSize,
             @JsonProperty("physicalInputPositions") long physicalInputPositions,
+            @JsonProperty("physicalInputReadTime") Duration physicalInputReadTime,
 
             @JsonProperty("internalNetworkInputDataSize") DataSize internalNetworkInputDataSize,
             @JsonProperty("internalNetworkInputPositions") long internalNetworkInputPositions,
@@ -176,6 +179,7 @@ public class StageStats
         this.physicalInputDataSize = requireNonNull(physicalInputDataSize, "physicalInputDataSize is null");
         checkArgument(physicalInputPositions >= 0, "physicalInputPositions is negative");
         this.physicalInputPositions = physicalInputPositions;
+        this.physicalInputReadTime = requireNonNull(physicalInputReadTime, "physicalInputReadTime is null");
 
         this.internalNetworkInputDataSize = requireNonNull(internalNetworkInputDataSize, "internalNetworkInputDataSize is null");
         checkArgument(internalNetworkInputPositions >= 0, "internalNetworkInputPositions is negative");
@@ -340,6 +344,12 @@ public class StageStats
     }
 
     @JsonProperty
+    public Duration getPhysicalInputReadTime()
+    {
+        return physicalInputReadTime;
+    }
+
+    @JsonProperty
     public DataSize getInternalNetworkInputDataSize()
     {
         return internalNetworkInputDataSize;
@@ -413,7 +423,7 @@ public class StageStats
 
     public BasicStageStats toBasicStageStats(StageState stageState)
     {
-        boolean isScheduled = (stageState == RUNNING) || stageState.isDone();
+        boolean isScheduled = stageState == RUNNING || stageState == FLUSHING || stageState.isDone();
 
         OptionalDouble progressPercentage = OptionalDouble.empty();
         if (isScheduled && totalDrivers != 0) {
@@ -428,6 +438,7 @@ public class StageStats
                 completedDrivers,
                 physicalInputDataSize,
                 physicalInputPositions,
+                physicalInputReadTime,
                 internalNetworkInputDataSize,
                 internalNetworkInputPositions,
                 rawInputDataSize,

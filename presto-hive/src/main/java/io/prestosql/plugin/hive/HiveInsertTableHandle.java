@@ -15,6 +15,7 @@ package io.prestosql.plugin.hive;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.metastore.HivePageSinkMetadata;
 import io.prestosql.spi.connector.ConnectorInsertTableHandle;
 
@@ -30,22 +31,22 @@ public class HiveInsertTableHandle
             @JsonProperty("schemaName") String schemaName,
             @JsonProperty("tableName") String tableName,
             @JsonProperty("inputColumns") List<HiveColumnHandle> inputColumns,
-            @JsonProperty("filePrefix") String filePrefix,
             @JsonProperty("pageSinkMetadata") HivePageSinkMetadata pageSinkMetadata,
             @JsonProperty("locationHandle") LocationHandle locationHandle,
             @JsonProperty("bucketProperty") Optional<HiveBucketProperty> bucketProperty,
             @JsonProperty("tableStorageFormat") HiveStorageFormat tableStorageFormat,
-            @JsonProperty("partitionStorageFormat") HiveStorageFormat partitionStorageFormat)
+            @JsonProperty("partitionStorageFormat") HiveStorageFormat partitionStorageFormat,
+            @JsonProperty("transaction") AcidTransaction transaction)
     {
         super(
                 schemaName,
                 tableName,
                 inputColumns,
-                filePrefix,
                 pageSinkMetadata,
                 locationHandle,
                 bucketProperty,
                 tableStorageFormat,
-                partitionStorageFormat);
+                partitionStorageFormat,
+                transaction);
     }
 }

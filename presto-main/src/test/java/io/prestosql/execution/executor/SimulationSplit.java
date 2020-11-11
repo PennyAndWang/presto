@@ -13,7 +13,6 @@
  */
 package io.prestosql.execution.executor;
 
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.Duration;
@@ -25,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.airlift.units.Duration.succinctNanos;
 import static io.prestosql.operator.Operator.NOT_BLOCKED;
 import static java.lang.String.format;
@@ -154,7 +154,7 @@ abstract class SimulationSplit
                 task.splitComplete(this);
             }
 
-            return Futures.immediateCheckedFuture(null);
+            return immediateFuture(null);
         }
 
         ListenableFuture<?> processResult = getProcessResult();
@@ -176,6 +176,7 @@ abstract class SimulationSplit
             this.perQuantaNanos = perQuantaNanos;
         }
 
+        @Override
         public boolean process()
         {
             if (getCompletedProcessNanos() >= super.scheduledTimeNanos) {
@@ -196,6 +197,7 @@ abstract class SimulationSplit
             return false;
         }
 
+        @Override
         public ListenableFuture<?> getProcessResult()
         {
             return NOT_BLOCKED;
@@ -238,6 +240,7 @@ abstract class SimulationSplit
             doneFuture.set(null);
         }
 
+        @Override
         public boolean process()
         {
             try {
@@ -254,6 +257,7 @@ abstract class SimulationSplit
             return true;
         }
 
+        @Override
         public ListenableFuture<?> getProcessResult()
         {
             future = SettableFuture.create();

@@ -19,9 +19,10 @@ import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.security.AccessControl;
+import io.prestosql.spi.connector.CatalogSchemaName;
 import io.prestosql.spi.security.Privilege;
-import io.prestosql.sql.analyzer.SemanticException;
 import io.prestosql.sql.tree.Expression;
+import io.prestosql.sql.tree.GrantOnType;
 import io.prestosql.sql.tree.Revoke;
 import io.prestosql.transaction.TransactionManager;
 
@@ -32,10 +33,13 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static io.prestosql.metadata.MetadataUtil.createCatalogSchemaName;
 import static io.prestosql.metadata.MetadataUtil.createPrincipal;
 import static io.prestosql.metadata.MetadataUtil.createQualifiedObjectName;
-import static io.prestosql.sql.analyzer.SemanticErrorCode.INVALID_PRIVILEGE;
-import static io.prestosql.sql.analyzer.SemanticErrorCode.MISSING_TABLE;
+import static io.prestosql.spi.StandardErrorCode.INVALID_PRIVILEGE;
+import static io.prestosql.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
+import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
 
 public class RevokeTask
         implements DataDefinitionTask<Revoke>
@@ -49,13 +53,49 @@ public class RevokeTask
     @Override
     public ListenableFuture<?> execute(Revoke statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
     {
-        Session session = stateMachine.getSession();
-        QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getTableName());
-        Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
-        if (!tableHandle.isPresent()) {
-            throw new SemanticException(MISSING_TABLE, statement, "Table '%s' does not exist", tableName);
+        if (statement.getType().filter(GrantOnType.SCHEMA::equals).isPresent()) {
+            executeRevokeOnSchema(stateMachine.getSession(), statement, metadata, accessControl);
+        }
+        else {
+            executeRevokeOnTable(stateMachine.getSession(), statement, metadata, accessControl);
+        }
+        return immediateFuture(null);
+    }
+
+    private void executeRevokeOnSchema(Session session, Revoke statement, Metadata metadata, AccessControl accessControl)
+    {
+        CatalogSchemaName schemaName = createCatalogSchemaName(session, statement, Optional.of(statement.getName()));
+
+        if (!metadata.schemaExists(session, schemaName)) {
+            throw semanticException(SCHEMA_NOT_FOUND, statement, "Schema '%s' does not exist", schemaName);
         }
 
+        Set<Privilege> privileges = parseStatementPrivileges(statement);
+        for (Privilege privilege : privileges) {
+            accessControl.checkCanRevokeSchemaPrivilege(session.toSecurityContext(), privilege, schemaName, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
+        }
+
+        metadata.revokeSchemaPrivileges(session, schemaName, privileges, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
+    }
+
+    private void executeRevokeOnTable(Session session, Revoke statement, Metadata metadata, AccessControl accessControl)
+    {
+        QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
+        if (tableHandle.isEmpty()) {
+            throw semanticException(TABLE_NOT_FOUND, statement, "Table '%s' does not exist", tableName);
+        }
+
+        Set<Privilege> privileges = parseStatementPrivileges(statement);
+        for (Privilege privilege : privileges) {
+            accessControl.checkCanRevokeTablePrivilege(session.toSecurityContext(), privilege, tableName, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
+        }
+
+        metadata.revokeTablePrivileges(session, tableName, privileges, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
+    }
+
+    private static Set<Privilege> parseStatementPrivileges(Revoke statement)
+    {
         Set<Privilege> privileges;
         if (statement.getPrivileges().isPresent()) {
             privileges = statement.getPrivileges().get().stream()
@@ -66,14 +106,7 @@ public class RevokeTask
             // All privileges
             privileges = EnumSet.allOf(Privilege.class);
         }
-
-        // verify current identity has permissions to revoke permissions
-        for (Privilege privilege : privileges) {
-            accessControl.checkCanRevokeTablePrivilege(session.getRequiredTransactionId(), session.getIdentity(), privilege, tableName, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
-        }
-
-        metadata.revokeTablePrivileges(session, tableName, privileges, createPrincipal(statement.getGrantee()), statement.isGrantOptionFor());
-        return immediateFuture(null);
+        return privileges;
     }
 
     private static Privilege parsePrivilege(Revoke statement, String privilegeString)
@@ -84,6 +117,6 @@ public class RevokeTask
             }
         }
 
-        throw new SemanticException(INVALID_PRIVILEGE, statement, "Unknown privilege: '%s'", privilegeString);
+        throw semanticException(INVALID_PRIVILEGE, statement, "Unknown privilege: '%s'", privilegeString);
     }
 }

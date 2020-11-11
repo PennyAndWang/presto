@@ -14,9 +14,11 @@
 package io.prestosql.plugin.hive.metastore;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.prestosql.spi.connector.SchemaTableName;
 
 import javax.annotation.concurrent.Immutable;
 
@@ -26,6 +28,7 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.prestosql.plugin.hive.metastore.MetastoreUtil.adjustRowCount;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -55,6 +58,12 @@ public class Partition
         this.parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
     }
 
+    @JsonIgnore
+    public Partition withAdjustedRowCount(String partitionName, long rowCountDelta)
+    {
+        return new Partition(databaseName, tableName, values, storage, columns, adjustRowCount(parameters, partitionName, rowCountDelta));
+    }
+
     @JsonProperty
     public String getDatabaseName()
     {
@@ -65,6 +74,12 @@ public class Partition
     public String getTableName()
     {
         return tableName;
+    }
+
+    @JsonIgnore
+    public SchemaTableName getSchemaTableName()
+    {
+        return new SchemaTableName(databaseName, tableName);
     }
 
     @JsonProperty

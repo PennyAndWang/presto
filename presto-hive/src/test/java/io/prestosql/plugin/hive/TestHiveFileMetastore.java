@@ -13,13 +13,15 @@
  */
 package io.prestosql.plugin.hive;
 
-import com.google.common.collect.ImmutableSet;
-import io.prestosql.plugin.hive.authentication.NoHdfsAuthentication;
 import io.prestosql.plugin.hive.metastore.HiveMetastore;
+import io.prestosql.plugin.hive.metastore.MetastoreConfig;
 import io.prestosql.plugin.hive.metastore.file.FileHiveMetastore;
+import io.prestosql.plugin.hive.metastore.file.FileHiveMetastoreConfig;
 import org.testng.SkipException;
 
 import java.io.File;
+
+import static io.prestosql.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
 
 public class TestHiveFileMetastore
         extends AbstractTestHiveLocal
@@ -28,11 +30,13 @@ public class TestHiveFileMetastore
     protected HiveMetastore createMetastore(File tempDir)
     {
         File baseDir = new File(tempDir, "metastore");
-        HiveConfig hiveConfig = new HiveConfig();
-        HdfsConfigurationInitializer updator = new HdfsConfigurationInitializer(hiveConfig);
-        HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(updator, ImmutableSet.of());
-        HdfsEnvironment hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, hiveConfig, new NoHdfsAuthentication());
-        return new FileHiveMetastore(hdfsEnvironment, baseDir.toURI().toString(), "test");
+        return new FileHiveMetastore(
+                HDFS_ENVIRONMENT,
+                new MetastoreConfig()
+                        .setHideDeltaLakeTables(true),
+                new FileHiveMetastoreConfig()
+                        .setCatalogDirectory(baseDir.toURI().toString())
+                        .setMetastoreUser("test"));
     }
 
     @Override
@@ -56,6 +60,12 @@ public class TestHiveFileMetastore
 
     @Override
     public void testTransactionDeleteInsert()
+    {
+        // FileHiveMetastore has various incompatibilities
+    }
+
+    @Override
+    public void testInsertOverwriteUnpartitioned()
     {
         // FileHiveMetastore has various incompatibilities
     }

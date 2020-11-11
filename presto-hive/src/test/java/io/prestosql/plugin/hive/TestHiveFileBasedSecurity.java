@@ -15,6 +15,7 @@ package io.prestosql.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.io.Resources;
 import io.prestosql.Session;
 import io.prestosql.spi.security.Identity;
 import io.prestosql.testing.QueryRunner;
@@ -22,11 +23,10 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
+import java.io.File;
 
-import static io.airlift.tpch.TpchTable.NATION;
-import static io.prestosql.plugin.hive.HiveQueryRunner.createQueryRunner;
 import static io.prestosql.testing.TestingSession.testSessionBuilder;
+import static io.prestosql.tpch.TpchTable.NATION;
 
 public class TestHiveFileBasedSecurity
 {
@@ -36,8 +36,13 @@ public class TestHiveFileBasedSecurity
     public void setUp()
             throws Exception
     {
-        String path = this.getClass().getResource("security.json").getPath();
-        queryRunner = createQueryRunner(ImmutableList.of(NATION), ImmutableMap.of(), "file", ImmutableMap.of("security.config-file", path), Optional.empty());
+        String path = new File(Resources.getResource(getClass(), "security.json").toURI()).getPath();
+        queryRunner = HiveQueryRunner.builder()
+                .setHiveProperties(ImmutableMap.of(
+                        "hive.security", "file",
+                        "security.config-file", path))
+                .setInitialTables(ImmutableList.of(NATION))
+                .build();
     }
 
     @AfterClass(alwaysRun = true)
@@ -66,6 +71,7 @@ public class TestHiveFileBasedSecurity
         return testSessionBuilder()
                 .setCatalog(queryRunner.getDefaultSession().getCatalog().get())
                 .setSchema(queryRunner.getDefaultSession().getSchema().get())
-                .setIdentity(new Identity(user, Optional.empty())).build();
+                .setIdentity(Identity.ofUser(user))
+                .build();
     }
 }

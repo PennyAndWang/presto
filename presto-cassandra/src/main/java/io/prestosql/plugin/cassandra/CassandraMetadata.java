@@ -13,12 +13,10 @@
  */
 package io.prestosql.plugin.cassandra;
 
-import com.datastax.driver.core.ProtocolVersion;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
-import io.prestosql.plugin.cassandra.util.CassandraCqlUtils;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
@@ -29,11 +27,10 @@ import io.prestosql.spi.connector.ConnectorOutputMetadata;
 import io.prestosql.spi.connector.ConnectorOutputTableHandle;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorTableHandle;
-import io.prestosql.spi.connector.ConnectorTableLayout;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
-import io.prestosql.spi.connector.ConnectorTableLayoutResult;
 import io.prestosql.spi.connector.ConnectorTableMetadata;
+import io.prestosql.spi.connector.ConnectorTableProperties;
 import io.prestosql.spi.connector.Constraint;
+import io.prestosql.spi.connector.ConstraintApplicationResult;
 import io.prestosql.spi.connector.NotFoundException;
 import io.prestosql.spi.connector.SchemaNotFoundException;
 import io.prestosql.spi.connector.SchemaTableName;
@@ -49,14 +46,16 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.MoreCollectors.toOptional;
 import static io.prestosql.plugin.cassandra.CassandraType.toCassandraType;
-import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.validSchemaName;
-import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.validTableName;
+import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.ID_COLUMN_NAME;
+import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.cqlNameToSqlName;
+import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.quoteStringLiteral;
+import static io.prestosql.plugin.cassandra.util.CassandraCqlUtils.validColumnName;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.lang.String.format;
@@ -67,10 +66,11 @@ import static java.util.stream.Collectors.toList;
 public class CassandraMetadata
         implements ConnectorMetadata
 {
+    public static final String PRESTO_COMMENT_METADATA = "Presto Metadata:";
+
     private final CassandraSession cassandraSession;
     private final CassandraPartitionManager partitionManager;
     private final boolean allowDropTable;
-    private final ProtocolVersion protocolVersion;
 
     private final JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec;
 
@@ -84,7 +84,6 @@ public class CassandraMetadata
         this.partitionManager = requireNonNull(partitionManager, "partitionManager is null");
         this.cassandraSession = requireNonNull(cassandraSession, "cassandraSession is null");
         this.allowDropTable = requireNonNull(config, "config is null").getAllowDropTable();
-        this.protocolVersion = requireNonNull(config, "config is null").getProtocolVersion();
         this.extraColumnMetadataCodec = requireNonNull(extraColumnMetadataCodec, "extraColumnMetadataCodec is null");
     }
 
@@ -162,7 +161,7 @@ public class CassandraMetadata
         CassandraTable table = cassandraSession.getTable(getTableName(tableHandle));
         ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
         for (CassandraColumnHandle columnHandle : table.getColumns()) {
-            columnHandles.put(CassandraCqlUtils.cqlNameToSqlName(columnHandle.getName()).toLowerCase(ENGLISH), columnHandle);
+            columnHandles.put(cqlNameToSqlName(columnHandle.getName()).toLowerCase(ENGLISH), columnHandle);
         }
         return columnHandles.build();
     }
@@ -185,7 +184,7 @@ public class CassandraMetadata
 
     private List<SchemaTableName> listTables(ConnectorSession session, SchemaTablePrefix prefix)
     {
-        if (!prefix.getTable().isPresent()) {
+        if (prefix.getTable().isEmpty()) {
             return listTables(session, prefix.getSchema());
         }
         return ImmutableList.of(prefix.toSchemaTableName());
@@ -198,9 +197,16 @@ public class CassandraMetadata
     }
 
     @Override
-    public List<ConnectorTableLayoutResult> getTableLayouts(ConnectorSession session, ConnectorTableHandle table, Constraint constraint, Optional<Set<ColumnHandle>> desiredColumns)
+    public boolean usesLegacyTableLayouts()
     {
-        CassandraTableHandle handle = (CassandraTableHandle) table;
+        return false;
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)
+    {
+        CassandraTableHandle handle = (CassandraTableHandle) tableHandle;
+
         CassandraPartitionResult partitionResult = partitionManager.getPartitions(handle, constraint.getSummary());
 
         String clusteringKeyPredicates = "";
@@ -210,30 +216,40 @@ public class CassandraMetadata
         }
         else {
             CassandraClusteringPredicatesExtractor clusteringPredicatesExtractor = new CassandraClusteringPredicatesExtractor(
-                    cassandraSession.getTable(getTableName(handle)).getClusteringKeyColumns(),
+                    cassandraSession.getTable(handle.getSchemaTableName()).getClusteringKeyColumns(),
                     partitionResult.getUnenforcedConstraint(),
                     cassandraSession.getCassandraVersion());
             clusteringKeyPredicates = clusteringPredicatesExtractor.getClusteringKeyPredicates();
             unenforcedConstraint = clusteringPredicatesExtractor.getUnenforcedConstraints();
         }
 
-        ConnectorTableLayout layout = getTableLayout(session, new CassandraTableLayoutHandle(
-                handle,
-                partitionResult.getPartitions(),
-                clusteringKeyPredicates));
-        return ImmutableList.of(new ConnectorTableLayoutResult(layout, unenforcedConstraint));
+        Optional<List<CassandraPartition>> currentPartitions = handle.getPartitions();
+        if (currentPartitions.isPresent() &&
+                // TODO: we should skip only when new table handle does not narrow down enforced predicate
+                currentPartitions.get().containsAll(partitionResult.getPartitions()) &&
+                handle.getClusteringKeyPredicates().equals(clusteringKeyPredicates)) {
+            return Optional.empty();
+        }
+
+        return Optional.of(
+                new ConstraintApplicationResult<>(new CassandraTableHandle(
+                        handle.getSchemaName(),
+                        handle.getTableName(),
+                        Optional.of(partitionResult.getPartitions()),
+                        clusteringKeyPredicates),
+                        unenforcedConstraint));
     }
 
     @Override
-    public ConnectorTableLayout getTableLayout(ConnectorSession session, ConnectorTableLayoutHandle handle)
+    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
     {
-        return new ConnectorTableLayout(handle);
+        return new ConnectorTableProperties();
     }
 
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
-        throw new PrestoException(NOT_SUPPORTED, "CREATE TABLE not yet supported for Cassandra");
+        createTable(tableMetadata);
     }
 
     @Override
@@ -262,36 +278,40 @@ public class CassandraMetadata
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorNewTableLayout> layout)
     {
+        return createTable(tableMetadata);
+    }
+
+    private CassandraOutputTableHandle createTable(ConnectorTableMetadata tableMetadata)
+    {
         ImmutableList.Builder<String> columnNames = ImmutableList.builder();
         ImmutableList.Builder<Type> columnTypes = ImmutableList.builder();
         ImmutableList.Builder<ExtraColumnMetadata> columnExtra = ImmutableList.builder();
-        columnExtra.add(new ExtraColumnMetadata("id", true));
+        columnExtra.add(new ExtraColumnMetadata(ID_COLUMN_NAME, true));
         for (ColumnMetadata column : tableMetadata.getColumns()) {
             columnNames.add(column.getName());
             columnTypes.add(column.getType());
             columnExtra.add(new ExtraColumnMetadata(column.getName(), column.isHidden()));
         }
 
-        // get the root directory for the database
         SchemaTableName table = tableMetadata.getTable();
         String schemaName = cassandraSession.getCaseSensitiveSchemaName(table.getSchemaName());
         String tableName = table.getTableName();
         List<String> columns = columnNames.build();
         List<Type> types = columnTypes.build();
-        StringBuilder queryBuilder = new StringBuilder(format("CREATE TABLE \"%s\".\"%s\"(id uuid primary key", schemaName, tableName));
+        StringBuilder queryBuilder = new StringBuilder(format("CREATE TABLE \"%s\".\"%s\"(%s uuid primary key", schemaName, tableName, ID_COLUMN_NAME));
         for (int i = 0; i < columns.size(); i++) {
             String name = columns.get(i);
             Type type = types.get(i);
             queryBuilder.append(", ")
-                    .append(name)
+                    .append(validColumnName(name))
                     .append(" ")
-                    .append(toCassandraType(type, protocolVersion).name().toLowerCase(ENGLISH));
+                    .append(toCassandraType(type, cassandraSession.getProtocolVersion()).name().toLowerCase(ENGLISH));
         }
         queryBuilder.append(") ");
 
         // encode column ordering in the cassandra table comment field since there is no better place to store this
         String columnMetadata = extraColumnMetadataCodec.toJson(columnExtra.build());
-        queryBuilder.append("WITH comment='").append(CassandraSession.PRESTO_COMMENT_METADATA).append(" ").append(columnMetadata).append("'");
+        queryBuilder.append("WITH comment=").append(quoteStringLiteral(PRESTO_COMMENT_METADATA + " " + columnMetadata));
 
         // We need to create the Cassandra table before commit because the record needs to be written to the table.
         cassandraSession.execute(queryBuilder.toString());
@@ -318,19 +338,35 @@ public class CassandraMetadata
 
         SchemaTableName schemaTableName = new SchemaTableName(table.getSchemaName(), table.getTableName());
         List<CassandraColumnHandle> columns = cassandraSession.getTable(schemaTableName).getColumns();
-        List<String> columnNames = columns.stream().map(CassandraColumnHandle::getName).map(CassandraCqlUtils::validColumnName).collect(Collectors.toList());
-        List<Type> columnTypes = columns.stream().map(CassandraColumnHandle::getType).collect(Collectors.toList());
+        List<String> columnNames = columns.stream()
+                .filter(columnHandle -> !isHiddenIdColumn(columnHandle))
+                .map(CassandraColumnHandle::getName)
+                .collect(Collectors.toList());
+        List<Type> columnTypes = columns.stream()
+                .filter(columnHandle -> !isHiddenIdColumn(columnHandle))
+                .map(CassandraColumnHandle::getType)
+                .collect(Collectors.toList());
+        boolean generateUuid = columns.stream()
+                .filter(CassandraMetadata::isHiddenIdColumn)
+                .collect(toOptional()) // must be at most one
+                .isPresent();
 
         return new CassandraInsertTableHandle(
-                validSchemaName(table.getSchemaName()),
-                validTableName(table.getTableName()),
+                table.getSchemaName(),
+                table.getTableName(),
                 columnNames,
-                columnTypes);
+                columnTypes,
+                generateUuid);
     }
 
     @Override
     public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         return Optional.empty();
+    }
+
+    private static boolean isHiddenIdColumn(CassandraColumnHandle columnHandle)
+    {
+        return columnHandle.isHidden() && ID_COLUMN_NAME.equals(columnHandle.getName());
     }
 }

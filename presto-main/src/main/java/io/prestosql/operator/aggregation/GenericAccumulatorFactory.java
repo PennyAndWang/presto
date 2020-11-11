@@ -25,10 +25,11 @@ import io.prestosql.operator.aggregation.AggregationMetadata.AccumulatorStateDes
 import io.prestosql.spi.Page;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.block.BlockBuilder;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.spi.function.WindowIndex;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.gen.JoinCompiler;
+import io.prestosql.type.BlockTypeOperators;
 
 import javax.annotation.Nullable;
 
@@ -60,9 +61,12 @@ public class GenericAccumulatorFactory
     private final List<Type> sourceTypes;
     private final List<Integer> orderByChannels;
     private final List<SortOrder> orderings;
+    private final boolean accumulatorHasRemoveInput;
 
     @Nullable
     private final JoinCompiler joinCompiler;
+    @Nullable
+    private final BlockTypeOperators blockTypeOperators;
 
     @Nullable
     private final Session session;
@@ -72,6 +76,7 @@ public class GenericAccumulatorFactory
     public GenericAccumulatorFactory(
             List<AccumulatorStateDescriptor> stateDescriptors,
             Constructor<? extends Accumulator> accumulatorConstructor,
+            boolean accumulatorHasRemoveInput,
             Constructor<? extends GroupedAccumulator> groupedAccumulatorConstructor,
             List<LambdaProvider> lambdaProviders,
             List<Integer> inputChannels,
@@ -80,12 +85,14 @@ public class GenericAccumulatorFactory
             List<Integer> orderByChannels,
             List<SortOrder> orderings,
             PagesIndex.Factory pagesIndexFactory,
-            JoinCompiler joinCompiler,
-            Session session,
+            @Nullable JoinCompiler joinCompiler,
+            @Nullable BlockTypeOperators blockTypeOperators,
+            @Nullable Session session,
             boolean distinct)
     {
         this.stateDescriptors = requireNonNull(stateDescriptors, "stateDescriptors is null");
         this.accumulatorConstructor = requireNonNull(accumulatorConstructor, "accumulatorConstructor is null");
+        this.accumulatorHasRemoveInput = accumulatorHasRemoveInput;
         this.groupedAccumulatorConstructor = requireNonNull(groupedAccumulatorConstructor, "groupedAccumulatorConstructor is null");
         this.lambdaProviders = ImmutableList.copyOf(requireNonNull(lambdaProviders, "lambdaProviders is null"));
         this.maskChannel = requireNonNull(maskChannel, "maskChannel is null");
@@ -96,8 +103,9 @@ public class GenericAccumulatorFactory
         checkArgument(orderByChannels.isEmpty() || !isNull(pagesIndexFactory), "No pagesIndexFactory to process ordering");
         this.pagesIndexFactory = pagesIndexFactory;
 
-        checkArgument(!distinct || !isNull(session) && !isNull(joinCompiler), "joinCompiler and session needed when distinct is true");
+        checkArgument(!distinct || !isNull(session) && !isNull(joinCompiler) && !isNull(blockTypeOperators), "joinCompiler, blockTypeOperators, and session needed when distinct is true");
         this.joinCompiler = joinCompiler;
+        this.blockTypeOperators = blockTypeOperators;
         this.session = session;
         this.distinct = distinct;
     }
@@ -106,6 +114,12 @@ public class GenericAccumulatorFactory
     public List<Integer> getInputChannels()
     {
         return inputChannels;
+    }
+
+    @Override
+    public boolean hasRemoveInput()
+    {
+        return accumulatorHasRemoveInput;
     }
 
     @Override
@@ -125,7 +139,7 @@ public class GenericAccumulatorFactory
                     .map(sourceTypes::get)
                     .collect(Collectors.toList());
 
-            accumulator = new DistinctingAccumulator(accumulator, argumentTypes, inputChannels, maskChannel, session, joinCompiler);
+            accumulator = new DistinctingAccumulator(accumulator, argumentTypes, inputChannels, maskChannel, session, joinCompiler, blockTypeOperators);
         }
         else {
             accumulator = instantiateAccumulator(inputChannels, maskChannel);
@@ -167,7 +181,7 @@ public class GenericAccumulatorFactory
                 argumentTypes.add(sourceTypes.get(input));
             }
 
-            accumulator = new DistinctingGroupedAccumulator(accumulator, argumentTypes, inputChannels, maskChannel, session, joinCompiler);
+            accumulator = new DistinctingGroupedAccumulator(accumulator, argumentTypes, inputChannels, maskChannel, session, joinCompiler, blockTypeOperators);
         }
         else {
             accumulator = instantiateGroupedAccumulator(inputChannels, maskChannel);
@@ -236,12 +250,13 @@ public class GenericAccumulatorFactory
                 List<Integer> inputs,
                 Optional<Integer> maskChannel,
                 Session session,
-                JoinCompiler joinCompiler)
+                JoinCompiler joinCompiler,
+                BlockTypeOperators blockTypeOperators)
         {
             this.accumulator = requireNonNull(accumulator, "accumulator is null");
             this.maskChannel = requireNonNull(maskChannel, "maskChannel is null");
 
-            hash = new MarkDistinctHash(session, inputTypes, Ints.toArray(inputs), Optional.empty(), joinCompiler, UpdateMemory.NOOP);
+            hash = new MarkDistinctHash(session, inputTypes, Ints.toArray(inputs), Optional.empty(), joinCompiler, blockTypeOperators, UpdateMemory.NOOP);
         }
 
         @Override
@@ -285,6 +300,12 @@ public class GenericAccumulatorFactory
 
         @Override
         public void addInput(WindowIndex index, List<Integer> channels, int startPosition, int endPosition)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void removeInput(WindowIndex index, List<Integer> channels, int startPosition, int endPosition)
         {
             throw new UnsupportedOperationException();
         }
@@ -334,7 +355,8 @@ public class GenericAccumulatorFactory
                 List<Integer> inputChannels,
                 Optional<Integer> maskChannel,
                 Session session,
-                JoinCompiler joinCompiler)
+                JoinCompiler joinCompiler,
+                BlockTypeOperators blockTypeOperators)
         {
             this.accumulator = requireNonNull(accumulator, "accumulator is null");
             this.maskChannel = requireNonNull(maskChannel, "maskChannel is null");
@@ -350,7 +372,7 @@ public class GenericAccumulatorFactory
                 inputs[i + 1] = inputChannels.get(i) + 1;
             }
 
-            hash = new MarkDistinctHash(session, types, inputs, Optional.empty(), joinCompiler, UpdateMemory.NOOP);
+            hash = new MarkDistinctHash(session, types, inputs, Optional.empty(), joinCompiler, blockTypeOperators, UpdateMemory.NOOP);
         }
 
         @Override
@@ -475,6 +497,12 @@ public class GenericAccumulatorFactory
         }
 
         @Override
+        public void removeInput(WindowIndex index, List<Integer> channels, int startPosition, int endPosition)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public void addIntermediate(Block block)
         {
             throw new UnsupportedOperationException();
@@ -544,14 +572,9 @@ public class GenericAccumulatorFactory
         @Override
         public void addInput(GroupByIdBlock groupIdsBlock, Page page)
         {
-            Block[] blocks = new Block[page.getChannelCount() + 1];
-            for (int i = 0; i < page.getChannelCount(); i++) {
-                blocks[i] = page.getBlock(i);
-            }
-            // Add group id block
-            blocks[page.getChannelCount()] = groupIdsBlock;
             groupCount = max(groupCount, groupIdsBlock.getGroupCount());
-            pagesIndex.addPage(new Page(blocks));
+            // Add group id block
+            pagesIndex.addPage(page.appendColumn(groupIdsBlock));
         }
 
         @Override

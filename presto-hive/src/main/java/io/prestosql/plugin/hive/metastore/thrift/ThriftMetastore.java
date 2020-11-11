@@ -13,17 +13,24 @@
  */
 package io.prestosql.plugin.hive.metastore.thrift;
 
+import io.prestosql.plugin.hive.HivePartition;
 import io.prestosql.plugin.hive.PartitionStatistics;
+import io.prestosql.plugin.hive.acid.AcidOperation;
+import io.prestosql.plugin.hive.acid.AcidTransaction;
+import io.prestosql.plugin.hive.authentication.HiveIdentity;
 import io.prestosql.plugin.hive.metastore.HivePrincipal;
 import io.prestosql.plugin.hive.metastore.HivePrivilegeInfo;
 import io.prestosql.plugin.hive.metastore.PartitionWithStatistics;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.TableNotFoundException;
+import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.security.RoleGrant;
 import io.prestosql.spi.statistics.ColumnStatisticType;
 import io.prestosql.spi.type.Type;
+import org.apache.hadoop.hive.metastore.api.DataOperationType;
 import org.apache.hadoop.hive.metastore.api.Database;
+import org.apache.hadoop.hive.metastore.api.EnvironmentContext;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
@@ -31,6 +38,7 @@ import org.apache.hadoop.hive.metastore.api.Table;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -38,51 +46,53 @@ import static io.prestosql.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 
 public interface ThriftMetastore
 {
-    void createDatabase(Database database);
+    void createDatabase(HiveIdentity identity, Database database);
 
-    void dropDatabase(String databaseName);
+    void dropDatabase(HiveIdentity identity, String databaseName);
 
-    void alterDatabase(String databaseName, Database database);
+    void alterDatabase(HiveIdentity identity, String databaseName, Database database);
 
-    void createTable(Table table);
+    void createTable(HiveIdentity identity, Table table);
 
-    void dropTable(String databaseName, String tableName, boolean deleteData);
+    void dropTable(HiveIdentity identity, String databaseName, String tableName, boolean deleteData);
 
-    void alterTable(String databaseName, String tableName, Table table);
+    void alterTable(HiveIdentity identity, String databaseName, String tableName, Table table);
+
+    void alterTransactionalTable(HiveIdentity identity, Table table, long transactionId, long writeId, EnvironmentContext context);
 
     List<String> getAllDatabases();
 
-    Optional<List<String>> getAllTables(String databaseName);
+    List<String> getAllTables(String databaseName);
 
-    Optional<List<String>> getAllViews(String databaseName);
+    List<String> getTablesWithParameter(String databaseName, String parameterKey, String parameterValue);
+
+    List<String> getAllViews(String databaseName);
 
     Optional<Database> getDatabase(String databaseName);
 
-    void addPartitions(String databaseName, String tableName, List<PartitionWithStatistics> partitions);
+    void addPartitions(HiveIdentity identity, String databaseName, String tableName, List<PartitionWithStatistics> partitions);
 
-    void dropPartition(String databaseName, String tableName, List<String> parts, boolean deleteData);
+    void dropPartition(HiveIdentity identity, String databaseName, String tableName, List<String> parts, boolean deleteData);
 
-    void alterPartition(String databaseName, String tableName, PartitionWithStatistics partition);
+    void alterPartition(HiveIdentity identity, String databaseName, String tableName, PartitionWithStatistics partition);
 
-    Optional<List<String>> getPartitionNames(String databaseName, String tableName);
+    Optional<List<String>> getPartitionNamesByFilter(HiveIdentity identity, String databaseName, String tableName, List<String> columnNames, TupleDomain<String> partitionKeysFilter);
 
-    Optional<List<String>> getPartitionNamesByParts(String databaseName, String tableName, List<String> parts);
+    Optional<Partition> getPartition(HiveIdentity identity, String databaseName, String tableName, List<String> partitionValues);
 
-    Optional<Partition> getPartition(String databaseName, String tableName, List<String> partitionValues);
+    List<Partition> getPartitionsByNames(HiveIdentity identity, String databaseName, String tableName, List<String> partitionNames);
 
-    List<Partition> getPartitionsByNames(String databaseName, String tableName, List<String> partitionNames);
-
-    Optional<Table> getTable(String databaseName, String tableName);
+    Optional<Table> getTable(HiveIdentity identity, String databaseName, String tableName);
 
     Set<ColumnStatisticType> getSupportedColumnStatistics(Type type);
 
-    PartitionStatistics getTableStatistics(String databaseName, String tableName);
+    PartitionStatistics getTableStatistics(HiveIdentity identity, Table table);
 
-    Map<String, PartitionStatistics> getPartitionStatistics(String databaseName, String tableName, Set<String> partitionNames);
+    Map<String, PartitionStatistics> getPartitionStatistics(HiveIdentity identity, Table table, List<Partition> partitions);
 
-    void updateTableStatistics(String databaseName, String tableName, Function<PartitionStatistics, PartitionStatistics> update);
+    void updateTableStatistics(HiveIdentity identity, String databaseName, String tableName, Function<PartitionStatistics, PartitionStatistics> update, AcidTransaction transaction);
 
-    void updatePartitionStatistics(String databaseName, String tableName, String partitionName, Function<PartitionStatistics, PartitionStatistics> update);
+    void updatePartitionStatistics(HiveIdentity identity, Table table, String partitionName, Function<PartitionStatistics, PartitionStatistics> update);
 
     void createRole(String role, String grantor);
 
@@ -90,22 +100,29 @@ public interface ThriftMetastore
 
     Set<String> listRoles();
 
-    void grantRoles(Set<String> roles, Set<HivePrincipal> grantees, boolean withAdminOption, HivePrincipal grantor);
+    void grantRoles(Set<String> roles, Set<HivePrincipal> grantees, boolean adminOption, HivePrincipal grantor);
 
-    void revokeRoles(Set<String> roles, Set<HivePrincipal> grantees, boolean adminOptionFor, HivePrincipal grantor);
+    void revokeRoles(Set<String> roles, Set<HivePrincipal> grantees, boolean adminOption, HivePrincipal grantor);
+
+    Set<RoleGrant> listGrantedPrincipals(String role);
 
     Set<RoleGrant> listRoleGrants(HivePrincipal principal);
 
-    void grantTablePrivileges(String databaseName, String tableName, HivePrincipal grantee, Set<HivePrivilegeInfo> privileges);
+    void grantTablePrivileges(String databaseName, String tableName, String tableOwner, HivePrincipal grantee, Set<HivePrivilegeInfo> privileges);
 
-    void revokeTablePrivileges(String databaseName, String tableName, HivePrincipal grantee, Set<HivePrivilegeInfo> privileges);
+    void revokeTablePrivileges(String databaseName, String tableName, String tableOwner, HivePrincipal grantee, Set<HivePrivilegeInfo> privileges);
 
-    Set<HivePrivilegeInfo> listTablePrivileges(String databaseName, String tableName, HivePrincipal principal);
+    /**
+     * @param principal when empty, all table privileges are returned
+     */
+    Set<HivePrivilegeInfo> listTablePrivileges(String databaseName, String tableName, String tableOwner, Optional<HivePrincipal> principal);
 
-    default Optional<List<FieldSchema>> getFields(String databaseName, String tableName)
+    boolean isImpersonationEnabled();
+
+    default Optional<List<FieldSchema>> getFields(HiveIdentity identity, String databaseName, String tableName)
     {
-        Optional<Table> table = getTable(databaseName, tableName);
-        if (!table.isPresent()) {
+        Optional<Table> table = getTable(identity, databaseName, tableName);
+        if (table.isEmpty()) {
             throw new TableNotFoundException(new SchemaTableName(databaseName, tableName));
         }
 
@@ -114,5 +131,60 @@ public interface ThriftMetastore
         }
 
         return Optional.of(table.get().getSd().getCols());
+    }
+
+    default long openTransaction(HiveIdentity identity)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void commitTransaction(HiveIdentity identity, long transactionId)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void sendTransactionHeartbeat(HiveIdentity identity, long transactionId)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void acquireSharedReadLock(HiveIdentity identity, String queryId, long transactionId, List<SchemaTableName> fullTables, List<HivePartition> partitions)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default String getValidWriteIds(HiveIdentity identity, List<SchemaTableName> tables, long currentTransactionId)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default Optional<String> getConfigValue(String name)
+    {
+        return Optional.empty();
+    }
+
+    default long allocateWriteId(HiveIdentity identity, String dbName, String tableName, long transactionId)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void acquireTableWriteLock(HiveIdentity identity, String queryId, long transactionId, String dbName, String tableName, DataOperationType operation, boolean isDynamicPartitionWrite)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void updateTableWriteId(HiveIdentity identity, String dbName, String tableName, long transactionId, long writeId, OptionalLong rowCountChange)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void alterPartitions(HiveIdentity identity, String dbName, String tableName, List<Partition> partitions, long writeId)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    default void addDynamicPartitions(HiveIdentity identity, String dbName, String tableName, List<String> partitionNames, long transactionId, long writeId, AcidOperation operation)
+    {
+        throw new UnsupportedOperationException();
     }
 }

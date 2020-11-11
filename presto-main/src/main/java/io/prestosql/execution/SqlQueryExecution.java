@@ -13,7 +13,6 @@
  */
 package io.prestosql.execution;
 
-import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.concurrent.SetThreadName;
 import io.airlift.log.Logger;
@@ -40,10 +39,11 @@ import io.prestosql.metadata.TableHandle;
 import io.prestosql.operator.ForScheduler;
 import io.prestosql.security.AccessControl;
 import io.prestosql.server.BasicQueryInfo;
-import io.prestosql.spi.ErrorCode;
+import io.prestosql.server.DynamicFilterService;
+import io.prestosql.server.protocol.Slug;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.QueryId;
-import io.prestosql.spi.resourcegroups.ResourceGroupId;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.split.SplitManager;
 import io.prestosql.split.SplitSource;
 import io.prestosql.sql.analyzer.Analysis;
@@ -54,7 +54,6 @@ import io.prestosql.sql.planner.DistributedExecutionPlanner;
 import io.prestosql.sql.planner.InputExtractor;
 import io.prestosql.sql.planner.LogicalPlanner;
 import io.prestosql.sql.planner.NodePartitioningManager;
-import io.prestosql.sql.planner.OutputExtractor;
 import io.prestosql.sql.planner.PartitioningHandle;
 import io.prestosql.sql.planner.Plan;
 import io.prestosql.sql.planner.PlanFragmenter;
@@ -65,33 +64,33 @@ import io.prestosql.sql.planner.SubPlan;
 import io.prestosql.sql.planner.TypeAnalyzer;
 import io.prestosql.sql.planner.optimizations.PlanOptimizer;
 import io.prestosql.sql.tree.Explain;
-import io.prestosql.transaction.TransactionManager;
-import io.prestosql.version.EmbedVersion;
+import io.prestosql.sql.tree.Query;
+import io.prestosql.sql.tree.Statement;
 import org.joda.time.DateTime;
 
 import javax.annotation.concurrent.ThreadSafe;
 import javax.inject.Inject;
 
-import java.net.URI;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
-import static io.airlift.concurrent.MoreFutures.addExceptionCallback;
-import static io.airlift.concurrent.MoreFutures.addSuccessCallback;
-import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.succinctBytes;
+import static io.prestosql.SystemSessionProperties.isEnableDynamicFiltering;
 import static io.prestosql.execution.buffer.OutputBuffers.BROADCAST_PARTITION_ID;
 import static io.prestosql.execution.buffer.OutputBuffers.createInitialEmptyOutputBuffers;
 import static io.prestosql.execution.scheduler.SqlQueryScheduler.createSqlQueryScheduler;
+import static io.prestosql.server.DynamicFilterService.DynamicFiltersStats;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.prestosql.sql.ParameterUtils.parameterExtractor;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -104,9 +103,9 @@ public class SqlQueryExecution
     private static final OutputBufferId OUTPUT_BUFFER_ID = new OutputBufferId(0);
 
     private final QueryStateMachine stateMachine;
-
-    private final ClusterSizeMonitor clusterSizeMonitor;
+    private final Slug slug;
     private final Metadata metadata;
+    private final TypeOperators typeOperators;
     private final SqlParser sqlParser;
     private final SplitManager splitManager;
     private final NodePartitioningManager nodePartitioningManager;
@@ -114,9 +113,7 @@ public class SqlQueryExecution
     private final List<PlanOptimizer> planOptimizers;
     private final PlanFragmenter planFragmenter;
     private final RemoteTaskFactory remoteTaskFactory;
-    private final LocationFactory locationFactory;
     private final int scheduleSplitBatchSize;
-    private final EmbedVersion embedVersion;
     private final ExecutorService queryExecutor;
     private final ScheduledExecutorService schedulerExecutor;
     private final FailureDetector failureDetector;
@@ -129,17 +126,14 @@ public class SqlQueryExecution
     private final Analysis analysis;
     private final StatsCalculator statsCalculator;
     private final CostCalculator costCalculator;
+    private final DynamicFilterService dynamicFilterService;
 
     private SqlQueryExecution(
-            String query,
-            Session session,
-            URI self,
-            ResourceGroupId resourceGroup,
             PreparedQuery preparedQuery,
-            ClusterSizeMonitor clusterSizeMonitor,
-            TransactionManager transactionManager,
+            QueryStateMachine stateMachine,
+            Slug slug,
             Metadata metadata,
-            AccessControl accessControl,
+            TypeOperators typeOperators, AccessControl accessControl,
             SqlParser sqlParser,
             SplitManager splitManager,
             NodePartitioningManager nodePartitioningManager,
@@ -147,9 +141,7 @@ public class SqlQueryExecution
             List<PlanOptimizer> planOptimizers,
             PlanFragmenter planFragmenter,
             RemoteTaskFactory remoteTaskFactory,
-            LocationFactory locationFactory,
             int scheduleSplitBatchSize,
-            EmbedVersion embedVersion,
             ExecutorService queryExecutor,
             ScheduledExecutorService schedulerExecutor,
             FailureDetector failureDetector,
@@ -159,19 +151,19 @@ public class SqlQueryExecution
             SplitSchedulerStats schedulerStats,
             StatsCalculator statsCalculator,
             CostCalculator costCalculator,
+            DynamicFilterService dynamicFilterService,
             WarningCollector warningCollector)
     {
-        try (SetThreadName ignored = new SetThreadName("Query-%s", session.getQueryId())) {
-            this.clusterSizeMonitor = requireNonNull(clusterSizeMonitor, "clusterSizeMonitor is null");
+        try (SetThreadName ignored = new SetThreadName("Query-%s", stateMachine.getQueryId())) {
+            this.slug = requireNonNull(slug, "slug is null");
             this.metadata = requireNonNull(metadata, "metadata is null");
+            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
             this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
             this.splitManager = requireNonNull(splitManager, "splitManager is null");
             this.nodePartitioningManager = requireNonNull(nodePartitioningManager, "nodePartitioningManager is null");
             this.nodeScheduler = requireNonNull(nodeScheduler, "nodeScheduler is null");
             this.planOptimizers = requireNonNull(planOptimizers, "planOptimizers is null");
             this.planFragmenter = requireNonNull(planFragmenter, "planFragmenter is null");
-            this.locationFactory = requireNonNull(locationFactory, "locationFactory is null");
-            this.embedVersion = requireNonNull(embedVersion, "embedVersion is null");
             this.queryExecutor = requireNonNull(queryExecutor, "queryExecutor is null");
             this.schedulerExecutor = requireNonNull(schedulerExecutor, "schedulerExecutor is null");
             this.failureDetector = requireNonNull(failureDetector, "failureDetector is null");
@@ -180,38 +172,23 @@ public class SqlQueryExecution
             this.schedulerStats = requireNonNull(schedulerStats, "schedulerStats is null");
             this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
             this.costCalculator = requireNonNull(costCalculator, "costCalculator is null");
+            this.dynamicFilterService = requireNonNull(dynamicFilterService, "dynamicFilterService is null");
 
             checkArgument(scheduleSplitBatchSize > 0, "scheduleSplitBatchSize must be greater than 0");
             this.scheduleSplitBatchSize = scheduleSplitBatchSize;
 
-            requireNonNull(query, "query is null");
-            requireNonNull(session, "session is null");
-            requireNonNull(self, "self is null");
-            this.stateMachine = QueryStateMachine.begin(
-                    query,
-                    session,
-                    self,
-                    resourceGroup,
-                    false,
-                    transactionManager,
-                    accessControl,
-                    queryExecutor,
-                    metadata,
-                    warningCollector);
+            this.stateMachine = requireNonNull(stateMachine, "stateMachine is null");
 
             // analyze query
-            requireNonNull(preparedQuery, "preparedQuery is null");
-            Analyzer analyzer = new Analyzer(
-                    stateMachine.getSession(),
-                    metadata,
-                    sqlParser,
-                    accessControl,
-                    Optional.of(queryExplainer),
-                    preparedQuery.getParameters(),
-                    warningCollector);
-            this.analysis = analyzer.analyze(preparedQuery.getStatement());
+            this.analysis = analyze(preparedQuery, stateMachine, metadata, accessControl, sqlParser, queryExplainer, warningCollector);
 
-            stateMachine.setUpdateType(analysis.getUpdateType());
+            stateMachine.addStateChangeListener(state -> {
+                if (!state.isDone()) {
+                    return;
+                }
+                unregisterDynamicFilteringQuery(
+                        dynamicFilterService.getDynamicFilteringStats(stateMachine.getQueryId(), stateMachine.getSession()));
+            });
 
             // when the query finishes cache the final query info, and clear the reference to the output stage
             AtomicReference<SqlQueryScheduler> queryScheduler = this.queryScheduler;
@@ -229,6 +206,69 @@ public class SqlQueryExecution
 
             this.remoteTaskFactory = new MemoryTrackingRemoteTaskFactory(requireNonNull(remoteTaskFactory, "remoteTaskFactory is null"), stateMachine);
         }
+    }
+
+    private synchronized void registerDynamicFilteringQuery(PlanRoot plan)
+    {
+        if (!isEnableDynamicFiltering(stateMachine.getSession())) {
+            return;
+        }
+
+        if (isDone()) {
+            // query has finished or was cancelled asynchronously
+            return;
+        }
+
+        dynamicFilterService.registerQuery(this, plan.getRoot());
+        stateMachine.setDynamicFiltersStatsSupplier(
+                () -> dynamicFilterService.getDynamicFilteringStats(
+                        stateMachine.getQueryId(),
+                        stateMachine.getSession()));
+    }
+
+    private synchronized void unregisterDynamicFilteringQuery(DynamicFiltersStats finalDynamicFiltersStats)
+    {
+        checkState(isDone(), "Expected query to be in done state");
+        stateMachine.setDynamicFiltersStatsSupplier(() -> finalDynamicFiltersStats);
+        dynamicFilterService.removeQuery(stateMachine.getQueryId());
+    }
+
+    private Analysis analyze(
+            PreparedQuery preparedQuery,
+            QueryStateMachine stateMachine,
+            Metadata metadata,
+            AccessControl accessControl,
+            SqlParser sqlParser,
+            QueryExplainer queryExplainer,
+            WarningCollector warningCollector)
+    {
+        stateMachine.beginAnalysis();
+
+        requireNonNull(preparedQuery, "preparedQuery is null");
+        Analyzer analyzer = new Analyzer(
+                stateMachine.getSession(),
+                metadata,
+                sqlParser,
+                accessControl,
+                Optional.of(queryExplainer),
+                preparedQuery.getParameters(),
+                parameterExtractor(preparedQuery.getStatement(), preparedQuery.getParameters()),
+                warningCollector);
+        Analysis analysis = analyzer.analyze(preparedQuery.getStatement());
+
+        stateMachine.setUpdateType(analysis.getUpdateType());
+        stateMachine.setReferencedTables(analysis.getReferencedTables());
+        stateMachine.setRoutines(analysis.getRoutines());
+
+        stateMachine.endAnalysis();
+
+        return analysis;
+    }
+
+    @Override
+    public Slug getSlug()
+    {
+        return slug;
     }
 
     @Override
@@ -255,7 +295,7 @@ public class SqlQueryExecution
             return finalQueryInfo.get().getQueryStats().getUserMemoryReservation();
         }
         if (scheduler == null) {
-            return new DataSize(0, BYTE);
+            return DataSize.ofBytes(0);
         }
         return succinctBytes(scheduler.getUserMemoryReservation());
     }
@@ -272,7 +312,7 @@ public class SqlQueryExecution
             return finalQueryInfo.get().getQueryStats().getTotalMemoryReservation();
         }
         if (scheduler == null) {
-            return new DataSize(0, BYTE);
+            return DataSize.ofBytes(0);
         }
         return succinctBytes(scheduler.getTotalMemoryReservation());
     }
@@ -326,37 +366,19 @@ public class SqlQueryExecution
     @Override
     public void start()
     {
-        if (stateMachine.transitionToWaitingForResources()) {
-            waitForMinimumWorkers();
-        }
-    }
-
-    private void waitForMinimumWorkers()
-    {
-        ListenableFuture<?> minimumWorkerFuture = clusterSizeMonitor.waitForMinimumWorkers();
-        addSuccessCallback(minimumWorkerFuture, () -> queryExecutor.submit(embedVersion.embedVersion(this::startExecution)));
-        addExceptionCallback(minimumWorkerFuture, throwable -> queryExecutor.submit(() -> stateMachine.transitionToFailed(throwable)));
-    }
-
-    private void startExecution()
-    {
         try (SetThreadName ignored = new SetThreadName("Query-%s", stateMachine.getQueryId())) {
             try {
-                // transition to planning
                 if (!stateMachine.transitionToPlanning()) {
                     // query already started or finished
                     return;
                 }
 
-                // analyze query
-                PlanRoot plan = analyzeQuery();
-
-                metadata.beginQuery(getSession(), plan.getConnectors());
-
-                // plan distribution of query
+                PlanRoot plan = planQuery();
+                // DynamicFilterService needs plan for query to be registered.
+                // Query should be registered before dynamic filter suppliers are requested in distribution planning.
+                registerDynamicFilteringQuery(plan);
                 planDistribution(plan);
 
-                // transition to starting
                 if (!stateMachine.transitionToStarting()) {
                     // query already started or finished
                     return;
@@ -391,35 +413,34 @@ public class SqlQueryExecution
     }
 
     @Override
-    public Optional<ErrorCode> getErrorCode()
-    {
-        return stateMachine.getFailureInfo().map(ExecutionFailureInfo::getErrorCode);
-    }
-
-    @Override
     public void addFinalQueryInfoListener(StateChangeListener<QueryInfo> stateChangeListener)
     {
         stateMachine.addQueryInfoStateChangeListener(stateChangeListener);
     }
 
-    private PlanRoot analyzeQuery()
+    private PlanRoot planQuery()
     {
         try {
-            return doAnalyzeQuery();
+            return doPlanQuery();
         }
         catch (StackOverflowError e) {
             throw new PrestoException(NOT_SUPPORTED, "statement is too large (stack overflow during analysis)", e);
         }
     }
 
-    private PlanRoot doAnalyzeQuery()
+    private PlanRoot doPlanQuery()
     {
-        // time analysis phase
-        stateMachine.beginAnalysis();
-
         // plan query
         PlanNodeIdAllocator idAllocator = new PlanNodeIdAllocator();
-        LogicalPlanner logicalPlanner = new LogicalPlanner(stateMachine.getSession(), planOptimizers, idAllocator, metadata, new TypeAnalyzer(sqlParser, metadata), statsCalculator, costCalculator, stateMachine.getWarningCollector());
+        LogicalPlanner logicalPlanner = new LogicalPlanner(stateMachine.getSession(),
+                planOptimizers,
+                idAllocator,
+                metadata,
+                typeOperators,
+                new TypeAnalyzer(sqlParser, metadata),
+                statsCalculator,
+                costCalculator,
+                stateMachine.getWarningCollector());
         Plan plan = logicalPlanner.plan(analysis);
         queryPlan.set(plan);
 
@@ -427,45 +448,20 @@ public class SqlQueryExecution
         List<Input> inputs = new InputExtractor(metadata, stateMachine.getSession()).extractInputs(plan.getRoot());
         stateMachine.setInputs(inputs);
 
-        // extract output
-        Optional<Output> output = new OutputExtractor().extractOutput(plan.getRoot());
-        stateMachine.setOutput(output);
+        stateMachine.setOutput(analysis.getTarget());
 
         // fragment the plan
         SubPlan fragmentedPlan = planFragmenter.createSubPlans(stateMachine.getSession(), plan, false, stateMachine.getWarningCollector());
 
-        // record analysis time
-        stateMachine.endAnalysis();
-
         boolean explainAnalyze = analysis.getStatement() instanceof Explain && ((Explain) analysis.getStatement()).isAnalyze();
-        return new PlanRoot(fragmentedPlan, !explainAnalyze, extractConnectors(analysis));
-    }
-
-    private static Set<CatalogName> extractConnectors(Analysis analysis)
-    {
-        ImmutableSet.Builder<CatalogName> connectors = ImmutableSet.builder();
-
-        for (TableHandle tableHandle : analysis.getTables()) {
-            connectors.add(tableHandle.getCatalogName());
-        }
-
-        if (analysis.getInsert().isPresent()) {
-            TableHandle target = analysis.getInsert().get().getTarget();
-            connectors.add(target.getCatalogName());
-        }
-
-        return connectors.build();
+        return new PlanRoot(fragmentedPlan, !explainAnalyze);
     }
 
     private void planDistribution(PlanRoot plan)
     {
-        // time distribution planning
-        stateMachine.beginDistributedPlanning();
-
         // plan the execution on the active nodes
-        DistributedExecutionPlanner distributedPlanner = new DistributedExecutionPlanner(splitManager);
+        DistributedExecutionPlanner distributedPlanner = new DistributedExecutionPlanner(splitManager, metadata, dynamicFilterService);
         StageExecutionPlan outputStageExecutionPlan = distributedPlanner.plan(plan.getRoot(), stateMachine.getSession());
-        stateMachine.endDistributedPlanning();
 
         // ensure split sources are closed
         stateMachine.addStateChangeListener(state -> {
@@ -490,7 +486,6 @@ public class SqlQueryExecution
         // build the stage execution objects (this doesn't schedule execution)
         SqlQueryScheduler scheduler = createSqlQueryScheduler(
                 stateMachine,
-                locationFactory,
                 outputStageExecutionPlan,
                 nodePartitioningManager,
                 nodeScheduler,
@@ -504,7 +499,8 @@ public class SqlQueryExecution
                 rootOutputBuffers,
                 nodeTaskMap,
                 executionPolicy,
-                schedulerStats);
+                schedulerStats,
+                dynamicFilterService);
 
         queryScheduler.set(scheduler);
 
@@ -636,17 +632,33 @@ public class SqlQueryExecution
         return queryInfo;
     }
 
+    @Override
+    public boolean shouldWaitForMinWorkers()
+    {
+        return shouldWaitForMinWorkers(analysis.getStatement());
+    }
+
+    private boolean shouldWaitForMinWorkers(Statement statement)
+    {
+        if (statement instanceof Query) {
+            // Allow set session statements and queries on internal system connectors to run without waiting
+            Collection<TableHandle> tables = analysis.getTables();
+            return !tables.stream()
+                    .map(TableHandle::getCatalogName)
+                    .allMatch(CatalogName::isInternalSystemConnector);
+        }
+        return true;
+    }
+
     private static class PlanRoot
     {
         private final SubPlan root;
         private final boolean summarizeTaskInfos;
-        private final Set<CatalogName> connectors;
 
-        public PlanRoot(SubPlan root, boolean summarizeTaskInfos, Set<CatalogName> connectors)
+        public PlanRoot(SubPlan root, boolean summarizeTaskInfos)
         {
             this.root = requireNonNull(root, "root is null");
             this.summarizeTaskInfos = summarizeTaskInfos;
-            this.connectors = ImmutableSet.copyOf(connectors);
         }
 
         public SubPlan getRoot()
@@ -658,11 +670,6 @@ public class SqlQueryExecution
         {
             return summarizeTaskInfos;
         }
-
-        public Set<CatalogName> getConnectors()
-        {
-            return connectors;
-        }
     }
 
     public static class SqlQueryExecutionFactory
@@ -671,6 +678,7 @@ public class SqlQueryExecution
         private final SplitSchedulerStats schedulerStats;
         private final int scheduleSplitBatchSize;
         private final Metadata metadata;
+        private final TypeOperators typeOperators;
         private final AccessControl accessControl;
         private final SqlParser sqlParser;
         private final SplitManager splitManager;
@@ -679,33 +687,29 @@ public class SqlQueryExecution
         private final List<PlanOptimizer> planOptimizers;
         private final PlanFragmenter planFragmenter;
         private final RemoteTaskFactory remoteTaskFactory;
-        private final TransactionManager transactionManager;
         private final QueryExplainer queryExplainer;
-        private final LocationFactory locationFactory;
-        private final EmbedVersion embedVersion;
         private final ExecutorService queryExecutor;
         private final ScheduledExecutorService schedulerExecutor;
         private final FailureDetector failureDetector;
         private final NodeTaskMap nodeTaskMap;
         private final Map<String, ExecutionPolicy> executionPolicies;
-        private final ClusterSizeMonitor clusterSizeMonitor;
         private final StatsCalculator statsCalculator;
         private final CostCalculator costCalculator;
+        private final DynamicFilterService dynamicFilterService;
 
         @Inject
-        SqlQueryExecutionFactory(QueryManagerConfig config,
+        SqlQueryExecutionFactory(
+                QueryManagerConfig config,
                 Metadata metadata,
+                TypeOperators typeOperators,
                 AccessControl accessControl,
                 SqlParser sqlParser,
-                LocationFactory locationFactory,
                 SplitManager splitManager,
                 NodePartitioningManager nodePartitioningManager,
                 NodeScheduler nodeScheduler,
                 PlanOptimizers planOptimizers,
                 PlanFragmenter planFragmenter,
                 RemoteTaskFactory remoteTaskFactory,
-                TransactionManager transactionManager,
-                EmbedVersion embedVersion,
                 @ForQueryExecution ExecutorService queryExecutor,
                 @ForScheduler ScheduledExecutorService schedulerExecutor,
                 FailureDetector failureDetector,
@@ -713,57 +717,51 @@ public class SqlQueryExecution
                 QueryExplainer queryExplainer,
                 Map<String, ExecutionPolicy> executionPolicies,
                 SplitSchedulerStats schedulerStats,
-                ClusterSizeMonitor clusterSizeMonitor,
                 StatsCalculator statsCalculator,
-                CostCalculator costCalculator)
+                CostCalculator costCalculator,
+                DynamicFilterService dynamicFilterService)
         {
             requireNonNull(config, "config is null");
             this.schedulerStats = requireNonNull(schedulerStats, "schedulerStats is null");
             this.scheduleSplitBatchSize = config.getScheduleSplitBatchSize();
             this.metadata = requireNonNull(metadata, "metadata is null");
+            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
             this.accessControl = requireNonNull(accessControl, "accessControl is null");
             this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
-            this.locationFactory = requireNonNull(locationFactory, "locationFactory is null");
             this.splitManager = requireNonNull(splitManager, "splitManager is null");
             this.nodePartitioningManager = requireNonNull(nodePartitioningManager, "nodePartitioningManager is null");
             this.nodeScheduler = requireNonNull(nodeScheduler, "nodeScheduler is null");
             this.planFragmenter = requireNonNull(planFragmenter, "planFragmenter is null");
             this.remoteTaskFactory = requireNonNull(remoteTaskFactory, "remoteTaskFactory is null");
-            this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
-            this.embedVersion = requireNonNull(embedVersion, "embedVersion is null");
             this.queryExecutor = requireNonNull(queryExecutor, "queryExecutor is null");
             this.schedulerExecutor = requireNonNull(schedulerExecutor, "schedulerExecutor is null");
             this.failureDetector = requireNonNull(failureDetector, "failureDetector is null");
             this.nodeTaskMap = requireNonNull(nodeTaskMap, "nodeTaskMap is null");
             this.queryExplainer = requireNonNull(queryExplainer, "queryExplainer is null");
             this.executionPolicies = requireNonNull(executionPolicies, "schedulerPolicies is null");
-            this.clusterSizeMonitor = requireNonNull(clusterSizeMonitor, "clusterSizeMonitor is null");
             this.planOptimizers = requireNonNull(planOptimizers, "planOptimizers is null").get();
             this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
             this.costCalculator = requireNonNull(costCalculator, "costCalculator is null");
+            this.dynamicFilterService = requireNonNull(dynamicFilterService, "dynamicFilterService is null");
         }
 
         @Override
         public QueryExecution createQueryExecution(
-                String query,
-                Session session,
                 PreparedQuery preparedQuery,
-                ResourceGroupId resourceGroup,
+                QueryStateMachine stateMachine,
+                Slug slug,
                 WarningCollector warningCollector)
         {
-            String executionPolicyName = SystemSessionProperties.getExecutionPolicy(session);
+            String executionPolicyName = SystemSessionProperties.getExecutionPolicy(stateMachine.getSession());
             ExecutionPolicy executionPolicy = executionPolicies.get(executionPolicyName);
-            checkArgument(executionPolicy != null, "No execution policy %s", executionPolicy);
+            checkArgument(executionPolicy != null, "No execution policy %s", executionPolicyName);
 
             return new SqlQueryExecution(
-                    query,
-                    session,
-                    locationFactory.createQueryLocation(session.getQueryId()),
-                    resourceGroup,
                     preparedQuery,
-                    clusterSizeMonitor,
-                    transactionManager,
+                    stateMachine,
+                    slug,
                     metadata,
+                    typeOperators,
                     accessControl,
                     sqlParser,
                     splitManager,
@@ -772,9 +770,7 @@ public class SqlQueryExecution
                     planOptimizers,
                     planFragmenter,
                     remoteTaskFactory,
-                    locationFactory,
                     scheduleSplitBatchSize,
-                    embedVersion,
                     queryExecutor,
                     schedulerExecutor,
                     failureDetector,
@@ -784,6 +780,7 @@ public class SqlQueryExecution
                     schedulerStats,
                     statsCalculator,
                     costCalculator,
+                    dynamicFilterService,
                     warningCollector);
         }
     }

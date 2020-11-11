@@ -15,7 +15,6 @@ package io.prestosql.spi.connector;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import io.prestosql.spi.block.SortOrder;
 
 import java.util.Collections;
 import java.util.Objects;
@@ -55,6 +54,7 @@ public final class SortingProperty<E>
         return column;
     }
 
+    @Override
     public Set<E> getColumns()
     {
         return Collections.singleton(column);
@@ -120,7 +120,7 @@ public final class SortingProperty<E>
         }
         SortingProperty<?> that = (SortingProperty<?>) o;
         return Objects.equals(column, that.column) &&
-                Objects.equals(order, that.order);
+                order == that.order;
     }
 
     @Override

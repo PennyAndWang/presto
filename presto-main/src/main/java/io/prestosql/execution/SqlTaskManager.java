@@ -28,6 +28,7 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.prestosql.Session;
 import io.prestosql.event.SplitMonitor;
+import io.prestosql.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.prestosql.execution.StateMachine.StateChangeListener;
 import io.prestosql.execution.buffer.BufferResult;
 import io.prestosql.execution.buffer.OutputBuffers;
@@ -57,6 +58,7 @@ import javax.inject.Inject;
 
 import java.io.Closeable;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
@@ -65,10 +67,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Predicates.notNull;
-import static com.google.common.collect.Iterables.filter;
-import static com.google.common.collect.Iterables.transform;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.prestosql.SystemSessionProperties.getQueryMaxMemoryPerNode;
+import static io.prestosql.SystemSessionProperties.getQueryMaxTotalMemoryPerNode;
 import static io.prestosql.SystemSessionProperties.resourceOvercommit;
 import static io.prestosql.execution.SqlTask.createSqlTask;
 import static io.prestosql.memory.LocalMemoryManager.GENERAL_POOL;
@@ -101,6 +103,9 @@ public class SqlTaskManager
     private final SqlTaskIoStats cachedStats = new SqlTaskIoStats();
     private final SqlTaskIoStats finishedTaskStats = new SqlTaskIoStats();
 
+    private final long queryMaxMemoryPerNode;
+    private final long queryMaxTotalMemoryPerNode;
+
     @GuardedBy("this")
     private long currentMemoryPoolAssignmentVersion;
     @GuardedBy("this")
@@ -129,6 +134,7 @@ public class SqlTaskManager
         clientTimeout = config.getClientTimeout();
 
         DataSize maxBufferSize = config.getSinkMaxBufferSize();
+        DataSize maxBroadcastBufferSize = config.getSinkMaxBroadcastBufferSize();
 
         taskNotificationExecutor = newFixedThreadPool(config.getTaskNotificationThreads(), threadsNamed("task-notification-%s"));
         taskNotificationExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) taskNotificationExecutor);
@@ -143,8 +149,12 @@ public class SqlTaskManager
         DataSize maxQueryTotalMemoryPerNode = nodeMemoryConfig.getMaxQueryTotalMemoryPerNode();
         DataSize maxQuerySpillPerNode = nodeSpillConfig.getQueryMaxSpillPerNode();
 
+        DataSize maxQueryMemoryPerNode = nodeMemoryConfig.getMaxQueryMemoryPerNode();
+        queryMaxMemoryPerNode = maxQueryMemoryPerNode.toBytes();
+        queryMaxTotalMemoryPerNode = maxQueryMemoryPerNode.toBytes();
+
         queryContexts = CacheBuilder.newBuilder().weakValues().build(CacheLoader.from(
-                queryId -> createQueryContext(queryId, localMemoryManager, nodeMemoryConfig, localSpillManager, gcMonitor, maxQueryUserMemoryPerNode, maxQueryTotalMemoryPerNode, maxQuerySpillPerNode)));
+                queryId -> createQueryContext(queryId, localMemoryManager, localSpillManager, gcMonitor, maxQueryUserMemoryPerNode, maxQueryTotalMemoryPerNode, maxQuerySpillPerNode)));
 
         tasks = CacheBuilder.newBuilder().build(CacheLoader.from(
                 taskId -> createSqlTask(
@@ -159,13 +169,13 @@ public class SqlTaskManager
                             return null;
                         },
                         maxBufferSize,
+                        maxBroadcastBufferSize,
                         failedTasks)));
     }
 
     private QueryContext createQueryContext(
             QueryId queryId,
             LocalMemoryManager localMemoryManager,
-            NodeMemoryConfig nodeMemoryConfig,
             LocalSpillManager localSpillManager,
             GcMonitor gcMonitor,
             DataSize maxQueryUserMemoryPerNode,
@@ -291,7 +301,9 @@ public class SqlTaskManager
     @Override
     public List<TaskInfo> getAllTaskInfo()
     {
-        return ImmutableList.copyOf(transform(tasks.asMap().values(), SqlTask::getTaskInfo));
+        return tasks.asMap().values().stream()
+                .map(SqlTask::getTaskInfo)
+                .collect(toImmutableList());
     }
 
     @Override
@@ -315,14 +327,13 @@ public class SqlTaskManager
     }
 
     @Override
-    public ListenableFuture<TaskInfo> getTaskInfo(TaskId taskId, TaskState currentState)
+    public ListenableFuture<TaskInfo> getTaskInfo(TaskId taskId, long currentVersion)
     {
         requireNonNull(taskId, "taskId is null");
-        requireNonNull(currentState, "currentState is null");
 
         SqlTask sqlTask = tasks.getUnchecked(taskId);
         sqlTask.recordHeartbeat();
-        return sqlTask.getTaskInfo(currentState);
+        return sqlTask.getTaskInfo(currentVersion);
     }
 
     @Override
@@ -334,14 +345,23 @@ public class SqlTaskManager
     }
 
     @Override
-    public ListenableFuture<TaskStatus> getTaskStatus(TaskId taskId, TaskState currentState)
+    public ListenableFuture<TaskStatus> getTaskStatus(TaskId taskId, long currentVersion)
     {
         requireNonNull(taskId, "taskId is null");
-        requireNonNull(currentState, "currentState is null");
 
         SqlTask sqlTask = tasks.getUnchecked(taskId);
         sqlTask.recordHeartbeat();
-        return sqlTask.getTaskStatus(currentState);
+        return sqlTask.getTaskStatus(currentVersion);
+    }
+
+    @Override
+    public VersionedDynamicFilterDomains acknowledgeAndGetNewDynamicFilterDomains(TaskId taskId, long currentDynamicFiltersVersion)
+    {
+        requireNonNull(taskId, "taskId is null");
+
+        SqlTask sqlTask = tasks.getUnchecked(taskId);
+        sqlTask.recordHeartbeat();
+        return sqlTask.acknowledgeAndGetNewDynamicFilterDomains(currentDynamicFiltersVersion);
     }
 
     @Override
@@ -356,6 +376,18 @@ public class SqlTaskManager
         if (resourceOvercommit(session)) {
             // TODO: This should have been done when the QueryContext was created. However, the session isn't available at that point.
             queryContexts.getUnchecked(taskId.getQueryId()).setResourceOvercommit();
+        }
+        else {
+            long sessionQueryMaxMemoryPerNode = getQueryMaxMemoryPerNode(session).toBytes();
+            long sessionQueryTotalMaxMemoryPerNode = getQueryMaxTotalMemoryPerNode(session).toBytes();
+            // Session property query_max_memory_per_node is used to only decrease memory limit
+            if (sessionQueryMaxMemoryPerNode <= queryMaxMemoryPerNode) {
+                queryContexts.getUnchecked(taskId.getQueryId()).setMaxUserMemory(sessionQueryMaxMemoryPerNode);
+            }
+
+            if (sessionQueryTotalMaxMemoryPerNode <= queryMaxTotalMemoryPerNode) {
+                queryContexts.getUnchecked(taskId.getQueryId()).setMaxTotalMemory(sessionQueryTotalMaxMemoryPerNode);
+            }
         }
 
         SqlTask sqlTask = tasks.getUnchecked(taskId);
@@ -412,18 +444,21 @@ public class SqlTaskManager
     public void removeOldTasks()
     {
         DateTime oldestAllowedTask = DateTime.now().minus(infoCacheTime.toMillis());
-        for (TaskInfo taskInfo : filter(transform(tasks.asMap().values(), SqlTask::getTaskInfo), notNull())) {
-            TaskId taskId = taskInfo.getTaskStatus().getTaskId();
-            try {
-                DateTime endTime = taskInfo.getStats().getEndTime();
-                if (endTime != null && endTime.isBefore(oldestAllowedTask)) {
-                    tasks.asMap().remove(taskId);
-                }
-            }
-            catch (RuntimeException e) {
-                log.warn(e, "Error while inspecting age of complete task %s", taskId);
-            }
-        }
+        tasks.asMap().values().stream()
+                .map(SqlTask::getTaskInfo)
+                .filter(Objects::nonNull)
+                .forEach(taskInfo -> {
+                    TaskId taskId = taskInfo.getTaskStatus().getTaskId();
+                    try {
+                        DateTime endTime = taskInfo.getStats().getEndTime();
+                        if (endTime != null && endTime.isBefore(oldestAllowedTask)) {
+                            tasks.asMap().remove(taskId);
+                        }
+                    }
+                    catch (RuntimeException e) {
+                        log.warn(e, "Error while inspecting age of complete task %s", taskId);
+                    }
+                });
     }
 
     public void failAbandonedTasks()

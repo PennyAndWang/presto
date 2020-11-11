@@ -15,6 +15,7 @@ package io.prestosql.orc;
 
 import com.google.common.collect.ImmutableList;
 import io.prestosql.orc.metadata.ColumnEncoding;
+import io.prestosql.orc.metadata.ColumnMetadata;
 import io.prestosql.orc.stream.InputStreamSources;
 
 import java.time.ZoneId;
@@ -26,15 +27,15 @@ import static java.util.Objects.requireNonNull;
 public class Stripe
 {
     private final long rowCount;
-    private final ZoneId timeZone;
-    private final List<ColumnEncoding> columnEncodings;
+    private final ZoneId fileTimeZone;
+    private final ColumnMetadata<ColumnEncoding> columnEncodings;
     private final List<RowGroup> rowGroups;
     private final InputStreamSources dictionaryStreamSources;
 
-    public Stripe(long rowCount, ZoneId timeZone, List<ColumnEncoding> columnEncodings, List<RowGroup> rowGroups, InputStreamSources dictionaryStreamSources)
+    public Stripe(long rowCount, ZoneId fileTimeZone, ColumnMetadata<ColumnEncoding> columnEncodings, List<RowGroup> rowGroups, InputStreamSources dictionaryStreamSources)
     {
         this.rowCount = rowCount;
-        this.timeZone = requireNonNull(timeZone, "timeZone is null");
+        this.fileTimeZone = requireNonNull(fileTimeZone, "fileTimeZone is null");
         this.columnEncodings = requireNonNull(columnEncodings, "columnEncodings is null");
         this.rowGroups = ImmutableList.copyOf(requireNonNull(rowGroups, "rowGroups is null"));
         this.dictionaryStreamSources = requireNonNull(dictionaryStreamSources, "dictionaryStreamSources is null");
@@ -45,12 +46,12 @@ public class Stripe
         return rowCount;
     }
 
-    public ZoneId getTimeZone()
+    public ZoneId getFileTimeZone()
     {
-        return timeZone;
+        return fileTimeZone;
     }
 
-    public List<ColumnEncoding> getColumnEncodings()
+    public ColumnMetadata<ColumnEncoding> getColumnEncodings()
     {
         return columnEncodings;
     }
@@ -70,7 +71,7 @@ public class Stripe
     {
         return toStringHelper(this)
                 .add("rowCount", rowCount)
-                .add("timeZone", timeZone)
+                .add("fileTimeZone", fileTimeZone)
                 .add("columnEncodings", columnEncodings)
                 .add("rowGroups", rowGroups)
                 .add("dictionaryStreams", dictionaryStreamSources)

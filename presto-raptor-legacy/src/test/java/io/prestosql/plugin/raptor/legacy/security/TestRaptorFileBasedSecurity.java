@@ -14,6 +14,7 @@
 package io.prestosql.plugin.raptor.legacy.security;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.io.Resources;
 import io.prestosql.Session;
 import io.prestosql.spi.security.Identity;
 import io.prestosql.testing.QueryRunner;
@@ -21,7 +22,7 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
+import java.io.File;
 
 import static io.prestosql.plugin.raptor.legacy.RaptorQueryRunner.createRaptorQueryRunner;
 import static io.prestosql.testing.TestingSession.testSessionBuilder;
@@ -34,7 +35,7 @@ public class TestRaptorFileBasedSecurity
     public void setUp()
             throws Exception
     {
-        String path = this.getClass().getResource("security.json").getPath();
+        String path = new File(Resources.getResource(getClass(), "security.json").toURI()).getPath();
         queryRunner = createRaptorQueryRunner(
                 ImmutableMap.of(),
                 true,
@@ -68,6 +69,7 @@ public class TestRaptorFileBasedSecurity
         return testSessionBuilder()
                 .setCatalog(queryRunner.getDefaultSession().getCatalog().get())
                 .setSchema(queryRunner.getDefaultSession().getSchema().get())
-                .setIdentity(new Identity(user, Optional.empty())).build();
+                .setIdentity(Identity.ofUser(user))
+                .build();
     }
 }

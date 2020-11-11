@@ -15,19 +15,22 @@ package io.prestosql.plugin.redshift;
 
 import io.prestosql.plugin.jdbc.BaseJdbcClient;
 import io.prestosql.plugin.jdbc.BaseJdbcConfig;
-import io.prestosql.plugin.jdbc.DriverConnectionFactory;
+import io.prestosql.plugin.jdbc.ConnectionFactory;
+import io.prestosql.plugin.jdbc.JdbcColumnHandle;
 import io.prestosql.plugin.jdbc.JdbcIdentity;
+import io.prestosql.plugin.jdbc.JdbcTableHandle;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.SchemaTableName;
-import org.postgresql.Driver;
 
 import javax.inject.Inject;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.Optional;
+import java.util.function.BiFunction;
 
-import static io.prestosql.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.String.format;
 
@@ -35,29 +38,23 @@ public class RedshiftClient
         extends BaseJdbcClient
 {
     @Inject
-    public RedshiftClient(BaseJdbcConfig config)
+    public RedshiftClient(BaseJdbcConfig config, ConnectionFactory connectionFactory)
     {
-        super(config, "\"", new DriverConnectionFactory(new Driver(), config));
+        super(config, "\"", connectionFactory);
     }
 
     @Override
     protected void renameTable(JdbcIdentity identity, String catalogName, String schemaName, String tableName, SchemaTableName newTable)
     {
         if (!schemaName.equals(newTable.getSchemaName())) {
-            throw new PrestoException(NOT_SUPPORTED, "Table rename across schemas is not supported in Redshift");
+            throw new PrestoException(NOT_SUPPORTED, "Table rename across schemas is not supported");
         }
 
         String sql = format(
                 "ALTER TABLE %s RENAME TO %s",
                 quoted(catalogName, schemaName, tableName),
                 quoted(newTable.getTableName()));
-
-        try (Connection connection = connectionFactory.openConnection(identity)) {
-            execute(connection, sql);
-        }
-        catch (SQLException e) {
-            throw new PrestoException(JDBC_ERROR, e);
-        }
+        execute(identity, sql);
     }
 
     @Override
@@ -71,14 +68,25 @@ public class RedshiftClient
     }
 
     @Override
-    protected String applyLimit(String sql, long limit)
+    protected Optional<BiFunction<String, Long, String>> limitFunction()
     {
-        return sql + " LIMIT " + limit;
+        return Optional.of((sql, limit) -> sql + " LIMIT " + limit);
     }
 
     @Override
-    public boolean isLimitGuaranteed()
+    public boolean isLimitGuaranteed(ConnectorSession session)
     {
         return true;
+    }
+
+    @Override
+    public void setColumnComment(JdbcIdentity identity, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
+    {
+        String sql = format(
+                "COMMENT ON COLUMN %s.%s IS %s",
+                quoted(handle.getRemoteTableName()),
+                quoted(column.getColumnName()),
+                comment.isPresent() ? format("'%s'", comment.get()) : "NULL");
+        execute(identity, sql);
     }
 }

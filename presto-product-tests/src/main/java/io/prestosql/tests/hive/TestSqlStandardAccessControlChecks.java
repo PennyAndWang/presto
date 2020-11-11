@@ -162,7 +162,7 @@ public class TestSqlStandardAccessControlChecks
 
         // Charlie still cannot access view because Bob does not have SELECT WITH GRANT OPTION
         assertThat(() -> charlieExecutor.executeQuery(format("SELECT * FROM %s", viewName)))
-                .failsWithMessage(format("Access Denied: View owner 'bob' cannot create view that selects from default.%s", tableName));
+                .failsWithMessage(format("Access Denied: View owner does not have sufficient privileges: View owner 'bob' cannot create view that selects from default.%s", tableName));
 
         // Give Bob SELECT WITH GRANT OPTION on the underlying table
         aliceExecutor.executeQuery(format("REVOKE SELECT ON %s FROM bob", tableName));
@@ -213,6 +213,15 @@ public class TestSqlStandardAccessControlChecks
     }
 
     @Test(groups = {AUTHORIZATION, PROFILE_SPECIFIC_TESTS})
+    public void testAccessControlSetTableAuthorization()
+    {
+        assertThat(() -> bobExecutor.executeQuery(format("ALTER TABLE %s SET AUTHORIZATION bob", tableName)))
+                .failsWithMessage(format("Access Denied: Cannot set authorization for table default.%s to USER bob", tableName));
+        aliceExecutor.executeQuery(format("ALTER TABLE %s SET AUTHORIZATION bob", tableName));
+        bobExecutor.executeQuery(format("ALTER TABLE %s SET AUTHORIZATION alice", tableName));
+    }
+
+    @Test(groups = {AUTHORIZATION, PROFILE_SPECIFIC_TESTS})
     public void testAccessControlShowColumns()
     {
         assertThat(() -> bobExecutor.executeQuery(format("SHOW COLUMNS FROM %s", tableName)))
@@ -220,6 +229,16 @@ public class TestSqlStandardAccessControlChecks
 
         aliceExecutor.executeQuery(format("GRANT SELECT ON %s TO bob", tableName));
         assertThat(bobExecutor.executeQuery(format("SHOW COLUMNS FROM %s", tableName))).hasRowsCount(2);
+    }
+
+    @Test(groups = {AUTHORIZATION, PROFILE_SPECIFIC_TESTS})
+    public void testAccessControlShowStatsFor()
+    {
+        assertThat(() -> bobExecutor.executeQuery(format("SHOW STATS FOR %s", tableName)))
+                .failsWithMessage(format("Access Denied: Cannot show stats for table default.%s", tableName));
+
+        aliceExecutor.executeQuery(format("GRANT SELECT ON %s TO bob", tableName));
+        assertThat(bobExecutor.executeQuery(format("SHOW STATS FOR %s", tableName))).hasRowsCount(3);
     }
 
     @Test(groups = {AUTHORIZATION, PROFILE_SPECIFIC_TESTS})

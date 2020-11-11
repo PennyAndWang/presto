@@ -56,7 +56,7 @@ public class CatalogMetadata
             ConnectorTransactionHandle systemTablesTransactionHandle,
             Set<ConnectorCapabilities> connectorCapabilities)
     {
-        this.catalogName = requireNonNull(catalogName, "connectorId is null");
+        this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.transactionHandle = requireNonNull(transactionHandle, "transactionHandle is null");
         this.informationSchemaId = requireNonNull(informationSchemaId, "informationSchemaId is null");
@@ -133,7 +133,7 @@ public class CatalogMetadata
     public String toString()
     {
         return toStringHelper(this)
-                .add("connectorId", catalogName)
+                .add("catalogName", catalogName)
                 .toString();
     }
 }

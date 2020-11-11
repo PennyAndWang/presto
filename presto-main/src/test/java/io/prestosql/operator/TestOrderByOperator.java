@@ -15,10 +15,10 @@ package io.prestosql.operator;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
-import io.airlift.units.DataSize.Unit;
 import io.prestosql.ExceededMemoryLimitException;
 import io.prestosql.operator.OrderByOperator.OrderByOperatorFactory;
 import io.prestosql.spi.Page;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.sql.gen.OrderingCompiler;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.testing.MaterializedResult;
@@ -41,8 +41,8 @@ import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.operator.OperatorAssertion.assertOperatorEquals;
 import static io.prestosql.operator.OperatorAssertion.toMaterializedResult;
 import static io.prestosql.operator.OperatorAssertion.toPages;
-import static io.prestosql.spi.block.SortOrder.ASC_NULLS_LAST;
-import static io.prestosql.spi.block.SortOrder.DESC_NULLS_LAST;
+import static io.prestosql.spi.connector.SortOrder.ASC_NULLS_LAST;
+import static io.prestosql.spi.connector.SortOrder.DESC_NULLS_LAST;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
@@ -60,6 +60,7 @@ public class TestOrderByOperator
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private DummySpillerFactory spillerFactory;
+    private TypeOperators typeOperators = new TypeOperators();
 
     @DataProvider
     public static Object[][] spillEnabled()
@@ -75,8 +76,8 @@ public class TestOrderByOperator
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         spillerFactory = new DummySpillerFactory();
     }
 
@@ -108,7 +109,7 @@ public class TestOrderByOperator
                 new PagesIndex.TestingFactory(false),
                 spillEnabled,
                 Optional.of(spillerFactory),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators));
 
         DriverContext driverContext = createDriverContext(memoryLimit);
         MaterializedResult.Builder expectedBuilder = resultBuilder(driverContext.getSession(), DOUBLE);
@@ -148,7 +149,7 @@ public class TestOrderByOperator
                 new PagesIndex.TestingFactory(false),
                 spillEnabled,
                 Optional.of(spillerFactory),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators));
 
         DriverContext driverContext = createDriverContext(memoryLimit);
         MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE)
@@ -183,7 +184,7 @@ public class TestOrderByOperator
                 new PagesIndex.TestingFactory(false),
                 spillEnabled,
                 Optional.of(spillerFactory),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators));
 
         DriverContext driverContext = createDriverContext(memoryLimit);
         MaterializedResult expected = MaterializedResult.resultBuilder(driverContext.getSession(), VARCHAR, BIGINT)
@@ -218,7 +219,7 @@ public class TestOrderByOperator
                 new PagesIndex.TestingFactory(false),
                 spillEnabled,
                 Optional.of(spillerFactory),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators));
 
         DriverContext driverContext = createDriverContext(memoryLimit);
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
@@ -242,7 +243,7 @@ public class TestOrderByOperator
                 .row(4L, 0.4)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(10, Unit.BYTE))
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.ofBytes(10))
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
@@ -257,7 +258,7 @@ public class TestOrderByOperator
                 new PagesIndex.TestingFactory(false),
                 false,
                 Optional.of(spillerFactory),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators));
 
         toPages(operatorFactory, driverContext, input);
     }

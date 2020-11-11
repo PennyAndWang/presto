@@ -167,8 +167,8 @@ public class TestDecimalOperators
         assertDecimalFunction("DECIMAL '.1234567890123456789' * DECIMAL '.1234567890123456789'", decimal(".01524157875323883675019051998750190521"));
 
         // scale exceeds max precision
-        assertInvalidFunction("DECIMAL '.1234567890123456789' * DECIMAL '.12345678901234567890'", "DECIMAL scale must be in range [0, precision]");
-        assertInvalidFunction("DECIMAL '.1' * DECIMAL '.12345678901234567890123456789012345678'", "DECIMAL scale must be in range [0, precision]");
+        assertInvalidFunction("DECIMAL '.1234567890123456789' * DECIMAL '.12345678901234567890'", "DECIMAL scale must be in range [0, precision (38)]: 39");
+        assertInvalidFunction("DECIMAL '.1' * DECIMAL '.12345678901234567890123456789012345678'", "DECIMAL scale must be in range [0, precision (38)]: 39");
 
         // runtime overflow tests
         assertInvalidFunction("DECIMAL '12345678901234567890123456789012345678' * DECIMAL '9'", NUMERIC_VALUE_OUT_OF_RANGE);
@@ -254,6 +254,8 @@ public class TestDecimalOperators
         assertInvalidFunction("DECIMAL '1.000000000000000000000000000000000000' / DECIMAL '0'", DIVISION_BY_ZERO);
         assertInvalidFunction("DECIMAL '1.000000000000000000000000000000000000' / DECIMAL '0.0000000000000000000000000000000000000'", DIVISION_BY_ZERO);
         assertInvalidFunction("DECIMAL '1' / DECIMAL '0.0000000000000000000000000000000000000'", DIVISION_BY_ZERO);
+
+        assertDecimalFunction("CAST(1000 AS DECIMAL(38,8)) / CAST(25 AS DECIMAL(38,8))", decimal("000000000000000000000000000040.00000000"));
     }
 
     @Test

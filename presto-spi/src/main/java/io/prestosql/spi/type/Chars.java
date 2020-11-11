@@ -25,6 +25,10 @@ public final class Chars
 {
     private Chars() {}
 
+    /**
+     * @deprecated Use {@code type instanceof CharType} instead.
+     */
+    @Deprecated
     public static boolean isCharType(Type type)
     {
         return type instanceof CharType;
@@ -60,10 +64,32 @@ public final class Chars
         return buffer;
     }
 
+    /**
+     * Pads String with spaces to given {@code CharType}'s length in code points.
+     * <p>
+     * Note: unlike {@code com.google.common.base.Strings#padEnd(java.lang.String, int, char)},
+     * this respects code points encoded as UTF-16 surrogate pairs.
+     */
+    public static String padSpaces(String value, CharType charType)
+    {
+        int length = charType.getLength();
+        int textLength = value.codePointCount(0, value.length());
+
+        if (textLength > length) {
+            throw new IllegalArgumentException("pad length is smaller than text length");
+        }
+
+        if (textLength == length) {
+            return value;
+        }
+
+        return value + " ".repeat(Math.max(0, length - textLength));
+    }
+
     public static Slice truncateToLengthAndTrimSpaces(Slice slice, Type type)
     {
         requireNonNull(type, "type is null");
-        if (!isCharType(type)) {
+        if (!(type instanceof CharType)) {
             throw new IllegalArgumentException("type must be the instance of CharType");
         }
         return truncateToLengthAndTrimSpaces(slice, CharType.class.cast(type));

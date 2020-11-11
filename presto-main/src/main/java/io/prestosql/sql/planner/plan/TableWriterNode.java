@@ -18,11 +18,14 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import io.prestosql.metadata.InsertTableHandle;
 import io.prestosql.metadata.NewTableLayout;
 import io.prestosql.metadata.OutputTableHandle;
+import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
+import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorTableMetadata;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.sql.planner.PartitioningScheme;
@@ -32,6 +35,7 @@ import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -46,6 +50,7 @@ public class TableWriterNode
     private final Symbol fragmentSymbol;
     private final List<Symbol> columns;
     private final List<String> columnNames;
+    private final Set<Symbol> notNullColumnSymbols;
     private final Optional<PartitioningScheme> partitioningScheme;
     private final Optional<StatisticAggregations> statisticsAggregation;
     private final Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor;
@@ -60,6 +65,7 @@ public class TableWriterNode
             @JsonProperty("fragmentSymbol") Symbol fragmentSymbol,
             @JsonProperty("columns") List<Symbol> columns,
             @JsonProperty("columnNames") List<String> columnNames,
+            @JsonProperty("notNullColumnSymbols") Set<Symbol> notNullColumnSymbols,
             @JsonProperty("partitioningScheme") Optional<PartitioningScheme> partitioningScheme,
             @JsonProperty("statisticsAggregation") Optional<StatisticAggregations> statisticsAggregation,
             @JsonProperty("statisticsAggregationDescriptor") Optional<StatisticAggregationsDescriptor<Symbol>> statisticsAggregationDescriptor)
@@ -76,6 +82,7 @@ public class TableWriterNode
         this.fragmentSymbol = requireNonNull(fragmentSymbol, "fragmentSymbol is null");
         this.columns = ImmutableList.copyOf(columns);
         this.columnNames = ImmutableList.copyOf(columnNames);
+        this.notNullColumnSymbols = ImmutableSet.copyOf(requireNonNull(notNullColumnSymbols, "notNullColumns is null"));
         this.partitioningScheme = requireNonNull(partitioningScheme, "partitioningScheme is null");
         this.statisticsAggregation = requireNonNull(statisticsAggregation, "statisticsAggregation is null");
         this.statisticsAggregationDescriptor = requireNonNull(statisticsAggregationDescriptor, "statisticsAggregationDescriptor is null");
@@ -128,6 +135,12 @@ public class TableWriterNode
     }
 
     @JsonProperty
+    public Set<Symbol> getNotNullColumnSymbols()
+    {
+        return notNullColumnSymbols;
+    }
+
+    @JsonProperty
     public Optional<PartitioningScheme> getPartitioningScheme()
     {
         return partitioningScheme;
@@ -166,14 +179,15 @@ public class TableWriterNode
     @Override
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
-        return new TableWriterNode(getId(), Iterables.getOnlyElement(newChildren), target, rowCountSymbol, fragmentSymbol, columns, columnNames, partitioningScheme, statisticsAggregation, statisticsAggregationDescriptor);
+        return new TableWriterNode(getId(), Iterables.getOnlyElement(newChildren), target, rowCountSymbol, fragmentSymbol, columns, columnNames, notNullColumnSymbols, partitioningScheme, statisticsAggregation, statisticsAggregationDescriptor);
     }
 
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "@type")
     @JsonSubTypes({
-            @JsonSubTypes.Type(value = CreateHandle.class, name = "CreateHandle"),
-            @JsonSubTypes.Type(value = InsertHandle.class, name = "InsertHandle"),
-            @JsonSubTypes.Type(value = DeleteHandle.class, name = "DeleteHandle")})
+            @JsonSubTypes.Type(value = CreateTarget.class, name = "CreateTarget"),
+            @JsonSubTypes.Type(value = InsertTarget.class, name = "InsertTarget"),
+            @JsonSubTypes.Type(value = DeleteTarget.class, name = "DeleteTarget"),
+            @JsonSubTypes.Type(value = RefreshMaterializedViewTarget.class, name = "RefreshMaterializedViewTarget")})
     @SuppressWarnings({"EmptyClass", "ClassMayBeInterface"})
     public abstract static class WriterTarget
     {
@@ -182,14 +196,14 @@ public class TableWriterNode
     }
 
     // only used during planning -- will not be serialized
-    public static class CreateName
+    public static class CreateReference
             extends WriterTarget
     {
         private final String catalog;
         private final ConnectorTableMetadata tableMetadata;
         private final Optional<NewTableLayout> layout;
 
-        public CreateName(String catalog, ConnectorTableMetadata tableMetadata, Optional<NewTableLayout> layout)
+        public CreateReference(String catalog, ConnectorTableMetadata tableMetadata, Optional<NewTableLayout> layout)
         {
             this.catalog = requireNonNull(catalog, "catalog is null");
             this.tableMetadata = requireNonNull(tableMetadata, "tableMetadata is null");
@@ -218,14 +232,14 @@ public class TableWriterNode
         }
     }
 
-    public static class CreateHandle
+    public static class CreateTarget
             extends WriterTarget
     {
         private final OutputTableHandle handle;
         private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public CreateHandle(
+        public CreateTarget(
                 @JsonProperty("handle") OutputTableHandle handle,
                 @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {
@@ -257,15 +271,22 @@ public class TableWriterNode
             extends WriterTarget
     {
         private final TableHandle handle;
+        private final List<ColumnHandle> columns;
 
-        public InsertReference(TableHandle handle)
+        public InsertReference(TableHandle handle, List<ColumnHandle> columns)
         {
             this.handle = requireNonNull(handle, "handle is null");
+            this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
         }
 
         public TableHandle getHandle()
         {
             return handle;
+        }
+
+        public List<ColumnHandle> getColumns()
+        {
+            return columns;
         }
 
         @Override
@@ -275,14 +296,14 @@ public class TableWriterNode
         }
     }
 
-    public static class InsertHandle
+    public static class InsertTarget
             extends WriterTarget
     {
         private final InsertTableHandle handle;
         private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public InsertHandle(
+        public InsertTarget(
                 @JsonProperty("handle") InsertTableHandle handle,
                 @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {
@@ -309,14 +330,102 @@ public class TableWriterNode
         }
     }
 
-    public static class DeleteHandle
+    public static class RefreshMaterializedViewReference
+            extends WriterTarget
+    {
+        private final QualifiedObjectName materializedViewName;
+        private final TableHandle storageTableHandle;
+        private final List<TableHandle> sourceTableHandles;
+
+        public RefreshMaterializedViewReference(QualifiedObjectName materializedViewName, TableHandle storageTableHandle, List<TableHandle> sourceTableHandles)
+        {
+            this.materializedViewName = requireNonNull(materializedViewName, "Materialized view handle is null");
+            this.storageTableHandle = requireNonNull(storageTableHandle, "Storage table handle is null");
+            this.sourceTableHandles = ImmutableList.copyOf(sourceTableHandles);
+        }
+
+        public QualifiedObjectName getMaterializedViewName()
+        {
+            return materializedViewName;
+        }
+
+        public TableHandle getStorageTableHandle()
+        {
+            return storageTableHandle;
+        }
+
+        public List<TableHandle> getSourceTableHandles()
+        {
+            return sourceTableHandles;
+        }
+
+        @Override
+        public String toString()
+        {
+            return materializedViewName.toString();
+        }
+    }
+
+    public static class RefreshMaterializedViewTarget
+            extends WriterTarget
+    {
+        private final TableHandle tableHandle;
+        private final InsertTableHandle insertHandle;
+        private final SchemaTableName schemaTableName;
+        private final List<TableHandle> sourceTableHandles;
+
+        @JsonCreator
+        public RefreshMaterializedViewTarget(
+                @JsonProperty("tableHandle") TableHandle tableHandle,
+                @JsonProperty("insertHandle") InsertTableHandle insertHandle,
+                @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
+                @JsonProperty("sourceTableHandles") List<TableHandle> sourceTableHandles)
+        {
+            this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
+            this.insertHandle = requireNonNull(insertHandle, "insertHandle is null");
+            this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
+            this.sourceTableHandles = ImmutableList.copyOf(sourceTableHandles);
+        }
+
+        @JsonProperty
+        public TableHandle getTableHandle()
+        {
+            return tableHandle;
+        }
+
+        @JsonProperty
+        public InsertTableHandle getInsertHandle()
+        {
+            return insertHandle;
+        }
+
+        @JsonProperty
+        public SchemaTableName getSchemaTableName()
+        {
+            return schemaTableName;
+        }
+
+        @JsonProperty
+        public List<TableHandle> getSourceTableHandles()
+        {
+            return sourceTableHandles;
+        }
+
+        @Override
+        public String toString()
+        {
+            return insertHandle.toString();
+        }
+    }
+
+    public static class DeleteTarget
             extends WriterTarget
     {
         private final TableHandle handle;
         private final SchemaTableName schemaTableName;
 
         @JsonCreator
-        public DeleteHandle(
+        public DeleteTarget(
                 @JsonProperty("handle") TableHandle handle,
                 @JsonProperty("schemaTableName") SchemaTableName schemaTableName)
         {

@@ -13,12 +13,15 @@
  */
 package io.prestosql.plugin.jdbc;
 
+import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.connector.AggregateFunction;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplitSource;
 import io.prestosql.spi.connector.ConnectorTableMetadata;
 import io.prestosql.spi.connector.SchemaTableName;
+import io.prestosql.spi.connector.SystemTable;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.statistics.TableStatistics;
 import io.prestosql.spi.type.Type;
@@ -27,8 +30,11 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+
+import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 
 public interface JdbcClient
 {
@@ -45,11 +51,26 @@ public interface JdbcClient
 
     List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle);
 
-    Optional<ColumnMapping> toPrestoType(ConnectorSession session, JdbcTypeHandle typeHandle);
+    Optional<ColumnMapping> toPrestoType(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle);
+
+    /**
+     * Bulk variant of {@link #toPrestoType(ConnectorSession, Connection, JdbcTypeHandle)}.
+     */
+    List<ColumnMapping> getColumnMappings(ConnectorSession session, List<JdbcTypeHandle> typeHandles);
 
     WriteMapping toWriteMapping(ConnectorSession session, Type type);
 
-    ConnectorSplitSource getSplits(JdbcIdentity identity, JdbcTableHandle tableHandle);
+    default boolean supportsGroupingSets()
+    {
+        return true;
+    }
+
+    default Optional<JdbcExpression> implementAggregation(ConnectorSession session, AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
+    {
+        return Optional.empty();
+    }
+
+    ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle tableHandle);
 
     Connection getConnection(JdbcIdentity identity, JdbcSplit split)
             throws SQLException;
@@ -63,7 +84,14 @@ public interface JdbcClient
     PreparedStatement buildSql(ConnectorSession session, Connection connection, JdbcSplit split, JdbcTableHandle table, List<JdbcColumnHandle> columns)
             throws SQLException;
 
-    boolean isLimitGuaranteed();
+    boolean supportsLimit();
+
+    boolean isLimitGuaranteed(ConnectorSession session);
+
+    default void setColumnComment(JdbcIdentity identity, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support setting column comments");
+    }
 
     void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column);
 
@@ -79,7 +107,7 @@ public interface JdbcClient
 
     void commitCreateTable(JdbcIdentity identity, JdbcOutputTableHandle handle);
 
-    JdbcOutputTableHandle beginInsertTable(ConnectorSession session, ConnectorTableMetadata tableMetadata);
+    JdbcOutputTableHandle beginInsertTable(ConnectorSession session, JdbcTableHandle tableHandle, List<JdbcColumnHandle> columns);
 
     void finishInsertTable(JdbcIdentity identity, JdbcOutputTableHandle handle);
 
@@ -96,4 +124,19 @@ public interface JdbcClient
             throws SQLException;
 
     TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle, TupleDomain<ColumnHandle> tupleDomain);
+
+    void createSchema(JdbcIdentity identity, String schemaName);
+
+    void dropSchema(JdbcIdentity identity, String schemaName);
+
+    default Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
+    {
+        return Optional.empty();
+    }
+
+    String quoted(String name);
+
+    String quoted(RemoteTableName remoteTableName);
+
+    Map<String, Object> getTableProperties(JdbcIdentity identity, JdbcTableHandle tableHandle);
 }

@@ -13,6 +13,7 @@
  */
 package io.prestosql.plugin.hive;
 
+import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.metastore.StorageFormat;
 import io.prestosql.spi.connector.ConnectorSession;
 import org.apache.hadoop.fs.Path;
@@ -20,15 +21,19 @@ import org.apache.hadoop.mapred.JobConf;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Properties;
 
 public interface HiveFileWriterFactory
 {
-    Optional<HiveFileWriter> createFileWriter(
+    Optional<FileWriter> createFileWriter(
             Path path,
             List<String> inputColumnNames,
             StorageFormat storageFormat,
             Properties schema,
             JobConf conf,
-            ConnectorSession session);
+            ConnectorSession session,
+            OptionalInt bucketNumber,
+            AcidTransaction transaction,
+            boolean useAcidSchema);
 }

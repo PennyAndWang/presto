@@ -26,11 +26,9 @@ import io.prestosql.spi.type.Type;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Future;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
-import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.prestosql.execution.buffer.TestingPagesSerdeFactory.testingPagesSerde;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -42,10 +40,10 @@ public final class BufferTestUtils
 {
     private BufferTestUtils() {}
 
-    static final PagesSerde PAGES_SERDE = testingPagesSerde();
+    private static final PagesSerde PAGES_SERDE = testingPagesSerde();
     static final Duration NO_WAIT = new Duration(0, MILLISECONDS);
     static final Duration MAX_WAIT = new Duration(1, SECONDS);
-    private static final DataSize BUFFERED_PAGE_SIZE = new DataSize(PAGES_SERDE.serialize(createPage(42)).getRetainedSizeInBytes(), BYTE);
+    private static final DataSize BUFFERED_PAGE_SIZE = DataSize.ofBytes(serializePage(createPage(42)).getRetainedSizeInBytes());
 
     static BufferResult getFuture(ListenableFuture<BufferResult> future, Duration maxWait)
     {
@@ -70,14 +68,18 @@ public final class BufferTestUtils
     static BufferResult createBufferResult(String bufferId, long token, List<Page> pages)
     {
         checkArgument(!pages.isEmpty(), "pages is empty");
+        ImmutableList.Builder<SerializedPage> builder = ImmutableList.builderWithExpectedSize(pages.size());
+        try (PagesSerde.PagesSerdeContext context = PAGES_SERDE.newContext()) {
+            for (Page p : pages) {
+                builder.add(PAGES_SERDE.serialize(context, p));
+            }
+        }
         return new BufferResult(
                 bufferId,
                 token,
                 token + pages.size(),
                 false,
-                pages.stream()
-                        .map(PAGES_SERDE::serialize)
-                        .collect(Collectors.toList()));
+                builder.build());
     }
 
     public static Page createPage(int i)
@@ -85,9 +87,16 @@ public final class BufferTestUtils
         return new Page(BlockAssertions.createLongsBlock(i));
     }
 
+    static SerializedPage serializePage(Page page)
+    {
+        try (PagesSerde.PagesSerdeContext context = PAGES_SERDE.newContext()) {
+            return PAGES_SERDE.serialize(context, page);
+        }
+    }
+
     static DataSize sizeOfPages(int count)
     {
-        return new DataSize(BUFFERED_PAGE_SIZE.toBytes() * count, BYTE);
+        return DataSize.ofBytes(BUFFERED_PAGE_SIZE.toBytes() * count);
     }
 
     static BufferResult getBufferResult(OutputBuffer buffer, OutputBufferId bufferId, long sequenceId, DataSize maxSize, Duration maxWait)
@@ -104,7 +113,7 @@ public final class BufferTestUtils
 
     static ListenableFuture<?> enqueuePage(OutputBuffer buffer, Page page)
     {
-        buffer.enqueue(ImmutableList.of(PAGES_SERDE.serialize(page)));
+        buffer.enqueue(ImmutableList.of(serializePage(page)));
         ListenableFuture<?> future = buffer.isFull();
         assertFalse(future.isDone());
         return future;
@@ -112,7 +121,7 @@ public final class BufferTestUtils
 
     static ListenableFuture<?> enqueuePage(OutputBuffer buffer, Page page, int partition)
     {
-        buffer.enqueue(partition, ImmutableList.of(PAGES_SERDE.serialize(page)));
+        buffer.enqueue(partition, ImmutableList.of(serializePage(page)));
         ListenableFuture<?> future = buffer.isFull();
         assertFalse(future.isDone());
         return future;
@@ -120,13 +129,13 @@ public final class BufferTestUtils
 
     public static void addPage(OutputBuffer buffer, Page page)
     {
-        buffer.enqueue(ImmutableList.of(PAGES_SERDE.serialize(page)));
+        buffer.enqueue(ImmutableList.of(serializePage(page)));
         assertTrue(buffer.isFull().isDone(), "Expected add page to not block");
     }
 
     public static void addPage(OutputBuffer buffer, Page page, int partition)
     {
-        buffer.enqueue(partition, ImmutableList.of(PAGES_SERDE.serialize(page)));
+        buffer.enqueue(partition, ImmutableList.of(serializePage(page)));
         assertTrue(buffer.isFull().isDone(), "Expected add page to not block");
     }
 

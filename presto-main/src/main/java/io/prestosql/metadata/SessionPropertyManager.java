@@ -20,6 +20,7 @@ import io.airlift.json.JsonCodecFactory;
 import io.prestosql.Session;
 import io.prestosql.SystemSessionProperties;
 import io.prestosql.connector.CatalogName;
+import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.session.PropertyMetadata;
@@ -34,6 +35,8 @@ import io.prestosql.spi.type.VarcharType;
 import io.prestosql.sql.planner.ParameterRewriter;
 import io.prestosql.sql.tree.Expression;
 import io.prestosql.sql.tree.ExpressionTreeRewriter;
+import io.prestosql.sql.tree.NodeRef;
+import io.prestosql.sql.tree.Parameter;
 
 import javax.annotation.Nullable;
 import javax.inject.Inject;
@@ -91,11 +94,11 @@ public final class SessionPropertyManager
 
     public void addConnectorSessionProperties(CatalogName catalogName, List<PropertyMetadata<?>> properties)
     {
-        requireNonNull(catalogName, "connectorId is null");
+        requireNonNull(catalogName, "catalogName is null");
         requireNonNull(properties, "properties is null");
 
         Map<String, PropertyMetadata<?>> propertiesByName = Maps.uniqueIndex(properties, PropertyMetadata::getName);
-        checkState(connectorSessionProperties.putIfAbsent(catalogName, propertiesByName) == null, "Session properties for connectorId '%s' are already registered", catalogName);
+        checkState(connectorSessionProperties.putIfAbsent(catalogName, propertiesByName) == null, "Session properties for catalog '%s' are already registered", catalogName);
     }
 
     public void removeConnectorSessionProperties(CatalogName catalogName)
@@ -112,11 +115,14 @@ public final class SessionPropertyManager
 
     public Optional<PropertyMetadata<?>> getConnectorSessionPropertyMetadata(CatalogName catalogName, String propertyName)
     {
-        requireNonNull(catalogName, "connectorId is null");
+        requireNonNull(catalogName, "catalogName is null");
         requireNonNull(propertyName, "propertyName is null");
         Map<String, PropertyMetadata<?>> properties = connectorSessionProperties.get(catalogName);
-        if (properties == null || properties.isEmpty()) {
-            throw new PrestoException(INVALID_SESSION_PROPERTY, "Unknown connector " + catalogName);
+        if (properties == null) {
+            throw new PrestoException(INVALID_SESSION_PROPERTY, "Unknown catalog: " + catalogName);
+        }
+        if (properties.isEmpty()) {
+            throw new PrestoException(INVALID_SESSION_PROPERTY, "No session properties found for catalog: " + catalogName);
         }
 
         return Optional.ofNullable(properties.get(propertyName));
@@ -174,10 +180,10 @@ public final class SessionPropertyManager
         return decodePropertyValue(name, value, type, property);
     }
 
-    public <T> T decodeCatalogPropertyValue(CatalogName connectorId, String catalogName, String propertyName, @Nullable String propertyValue, Class<T> type)
+    public <T> T decodeCatalogPropertyValue(CatalogName catalog, String catalogName, String propertyName, @Nullable String propertyValue, Class<T> type)
     {
         String fullPropertyName = catalogName + "." + propertyName;
-        PropertyMetadata<?> property = getConnectorSessionPropertyMetadata(connectorId, propertyName)
+        PropertyMetadata<?> property = getConnectorSessionPropertyMetadata(catalog, propertyName)
                 .orElseThrow(() -> new PrestoException(INVALID_SESSION_PROPERTY, "Unknown session property " + fullPropertyName));
 
         return decodePropertyValue(fullPropertyName, propertyValue, type, property);
@@ -191,10 +197,10 @@ public final class SessionPropertyManager
         decodePropertyValue(propertyName, propertyValue, propertyMetadata.getJavaType(), propertyMetadata);
     }
 
-    public void validateCatalogSessionProperty(CatalogName connectorId, String catalogName, String propertyName, String propertyValue)
+    public void validateCatalogSessionProperty(CatalogName catalog, String catalogName, String propertyName, String propertyValue)
     {
         String fullPropertyName = catalogName + "." + propertyName;
-        PropertyMetadata<?> propertyMetadata = getConnectorSessionPropertyMetadata(connectorId, propertyName)
+        PropertyMetadata<?> propertyMetadata = getConnectorSessionPropertyMetadata(catalog, propertyName)
                 .orElseThrow(() -> new PrestoException(INVALID_SESSION_PROPERTY, "Unknown session property " + fullPropertyName));
 
         decodePropertyValue(fullPropertyName, propertyValue, propertyMetadata.getJavaType(), propertyMetadata);
@@ -223,10 +229,10 @@ public final class SessionPropertyManager
         }
     }
 
-    public static Object evaluatePropertyValue(Expression expression, Type expectedType, Session session, Metadata metadata, List<Expression> parameters)
+    public static Object evaluatePropertyValue(Expression expression, Type expectedType, Session session, Metadata metadata, AccessControl accessControl, Map<NodeRef<Parameter>, Expression> parameters)
     {
         Expression rewritten = ExpressionTreeRewriter.rewriteWith(new ParameterRewriter(parameters), expression);
-        Object value = evaluateConstantExpression(rewritten, expectedType, metadata, session, parameters);
+        Object value = evaluateConstantExpression(rewritten, expectedType, metadata, session, accessControl, parameters);
 
         // convert to object value type of SQL type
         BlockBuilder blockBuilder = expectedType.createBlockBuilder(null, 1);
@@ -242,7 +248,7 @@ public final class SessionPropertyManager
     public static String serializeSessionProperty(Type type, Object value)
     {
         if (value == null) {
-            throw new PrestoException(INVALID_SESSION_PROPERTY, "Session property can not be null");
+            throw new PrestoException(INVALID_SESSION_PROPERTY, "Session property cannot be null");
         }
         if (BooleanType.BOOLEAN.equals(type)) {
             return value.toString();
@@ -268,7 +274,7 @@ public final class SessionPropertyManager
     private static Object deserializeSessionProperty(Type type, String value)
     {
         if (value == null) {
-            throw new PrestoException(INVALID_SESSION_PROPERTY, "Session property can not be null");
+            throw new PrestoException(INVALID_SESSION_PROPERTY, "Session property cannot be null");
         }
         if (VarcharType.VARCHAR.equals(type)) {
             return value;
@@ -351,7 +357,8 @@ public final class SessionPropertyManager
         private final String defaultValue;
         private final boolean hidden;
 
-        private SessionPropertyValue(String value,
+        private SessionPropertyValue(
+                String value,
                 String defaultValue,
                 String fullyQualifiedName,
                 Optional<String> catalogName,

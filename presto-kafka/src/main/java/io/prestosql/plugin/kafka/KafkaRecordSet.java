@@ -13,69 +13,76 @@
  */
 package io.prestosql.plugin.kafka;
 
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
-import io.airlift.log.Logger;
+import com.google.common.collect.Multimap;
 import io.airlift.slice.Slice;
 import io.prestosql.decoder.DecoderColumnHandle;
 import io.prestosql.decoder.FieldValueProvider;
 import io.prestosql.decoder.RowDecoder;
-import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.Block;
+import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.RecordCursor;
 import io.prestosql.spi.connector.RecordSet;
+import io.prestosql.spi.type.MapType;
 import io.prestosql.spi.type.Type;
-import kafka.api.FetchRequest;
-import kafka.api.FetchRequestBuilder;
-import kafka.javaapi.FetchResponse;
-import kafka.javaapi.consumer.SimpleConsumer;
-import kafka.message.MessageAndOffset;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.Headers;
 
-import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.prestosql.decoder.FieldValueProviders.booleanValueProvider;
 import static io.prestosql.decoder.FieldValueProviders.bytesValueProvider;
 import static io.prestosql.decoder.FieldValueProviders.longValueProvider;
-import static io.prestosql.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
-import static java.lang.String.format;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.HEADERS_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.KEY_CORRUPT_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.KEY_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.KEY_LENGTH_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.MESSAGE_CORRUPT_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.MESSAGE_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.MESSAGE_LENGTH_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.OFFSET_TIMESTAMP_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.PARTITION_ID_FIELD;
+import static io.prestosql.plugin.kafka.KafkaInternalFieldManager.PARTITION_OFFSET_FIELD;
+import static io.prestosql.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
+import static io.prestosql.spi.type.TypeUtils.writeNativeValue;
+import static java.lang.Math.max;
+import static java.util.Collections.emptyIterator;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Kafka specific record set. Returns a cursor for a topic which iterates over a Kafka partition segment.
- */
 public class KafkaRecordSet
         implements RecordSet
 {
-    private static final Logger log = Logger.get(KafkaRecordSet.class);
-
-    private static final int KAFKA_READ_BUFFER_SIZE = 100_000;
     private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
+    private static final int CONSUMER_POLL_TIMEOUT = 100;
 
     private final KafkaSplit split;
-    private final KafkaSimpleConsumerManager consumerManager;
 
+    private final KafkaConsumerFactory consumerFactory;
     private final RowDecoder keyDecoder;
     private final RowDecoder messageDecoder;
 
     private final List<KafkaColumnHandle> columnHandles;
     private final List<Type> columnTypes;
 
-    KafkaRecordSet(KafkaSplit split,
-            KafkaSimpleConsumerManager consumerManager,
+    KafkaRecordSet(
+            KafkaSplit split,
+            KafkaConsumerFactory consumerFactory,
             List<KafkaColumnHandle> columnHandles,
             RowDecoder keyDecoder,
             RowDecoder messageDecoder)
     {
         this.split = requireNonNull(split, "split is null");
-
-        this.consumerManager = requireNonNull(consumerManager, "consumerManager is null");
+        this.consumerFactory = requireNonNull(consumerFactory, "consumerManager is null");
 
         this.keyDecoder = requireNonNull(keyDecoder, "rowDecoder is null");
         this.messageDecoder = requireNonNull(messageDecoder, "rowDecoder is null");
@@ -103,25 +110,28 @@ public class KafkaRecordSet
         return new KafkaRecordCursor();
     }
 
-    public class KafkaRecordCursor
+    private class KafkaRecordCursor
             implements RecordCursor
     {
-        private long totalBytes;
-        private long totalMessages;
-        private long cursorOffset = split.getStart();
-        private Iterator<MessageAndOffset> messageAndOffsetIterator;
-        private final AtomicBoolean reported = new AtomicBoolean();
+        private final TopicPartition topicPartition;
+        private final KafkaConsumer<byte[], byte[]> kafkaConsumer;
+        private Iterator<ConsumerRecord<byte[], byte[]>> records = emptyIterator();
+        private long completedBytes;
 
         private final FieldValueProvider[] currentRowValues = new FieldValueProvider[columnHandles.size()];
 
-        KafkaRecordCursor()
+        private KafkaRecordCursor()
         {
+            topicPartition = new TopicPartition(split.getTopicName(), split.getPartitionId());
+            kafkaConsumer = consumerFactory.create();
+            kafkaConsumer.assign(ImmutableList.of(topicPartition));
+            kafkaConsumer.seek(topicPartition, split.getMessagesRange().getBegin());
         }
 
         @Override
         public long getCompletedBytes()
         {
-            return totalBytes;
+            return completedBytes;
         }
 
         @Override
@@ -140,73 +150,48 @@ public class KafkaRecordSet
         @Override
         public boolean advanceNextPosition()
         {
-            while (true) {
-                if (cursorOffset >= split.getEnd()) {
-                    return endOfData(); // Split end is exclusive.
+            if (!records.hasNext()) {
+                if (kafkaConsumer.position(topicPartition) >= split.getMessagesRange().getEnd()) {
+                    return false;
                 }
-                // Create a fetch request
-                openFetchRequest();
-
-                while (messageAndOffsetIterator.hasNext()) {
-                    MessageAndOffset currentMessageAndOffset = messageAndOffsetIterator.next();
-                    long messageOffset = currentMessageAndOffset.offset();
-
-                    if (messageOffset >= split.getEnd()) {
-                        return endOfData(); // Past our split end. Bail.
-                    }
-
-                    if (messageOffset >= cursorOffset) {
-                        return nextRow(currentMessageAndOffset);
-                    }
-                }
-                messageAndOffsetIterator = null;
+                records = kafkaConsumer.poll(CONSUMER_POLL_TIMEOUT).iterator();
+                return advanceNextPosition();
             }
+
+            return nextRow(records.next());
         }
 
-        private boolean endOfData()
+        private boolean nextRow(ConsumerRecord<byte[], byte[]> message)
         {
-            if (!reported.getAndSet(true)) {
-                log.debug("Found a total of %d messages with %d bytes (%d messages expected). Last Offset: %d (%d, %d)",
-                        totalMessages, totalBytes, split.getEnd() - split.getStart(),
-                        cursorOffset, split.getStart(), split.getEnd());
-            }
-            return false;
-        }
+            requireNonNull(message, "message is null");
 
-        private boolean nextRow(MessageAndOffset messageAndOffset)
-        {
-            cursorOffset = messageAndOffset.offset() + 1; // Cursor now points to the next message.
-            totalBytes += messageAndOffset.message().payloadSize();
-            totalMessages++;
+            if (message.offset() >= split.getMessagesRange().getEnd()) {
+                return false;
+            }
+
+            completedBytes += max(message.serializedKeySize(), 0) + max(message.serializedValueSize(), 0);
 
             byte[] keyData = EMPTY_BYTE_ARRAY;
-            byte[] messageData = EMPTY_BYTE_ARRAY;
-            ByteBuffer key = messageAndOffset.message().key();
-            if (key != null) {
-                keyData = new byte[key.remaining()];
-                key.get(keyData);
+            if (message.key() != null) {
+                keyData = message.key();
             }
 
-            ByteBuffer message = messageAndOffset.message().payload();
-            if (message != null) {
-                messageData = new byte[message.remaining()];
-                message.get(messageData);
+            byte[] messageData = EMPTY_BYTE_ARRAY;
+            if (message.value() != null) {
+                messageData = message.value();
             }
+            long timeStamp = message.timestamp();
 
             Map<ColumnHandle, FieldValueProvider> currentRowValuesMap = new HashMap<>();
 
-            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedKey = keyDecoder.decodeRow(keyData, null);
-            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedValue = messageDecoder.decodeRow(messageData, null);
+            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedKey = keyDecoder.decodeRow(keyData);
+            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedValue = messageDecoder.decodeRow(messageData);
 
             for (DecoderColumnHandle columnHandle : columnHandles) {
                 if (columnHandle.isInternal()) {
-                    KafkaInternalFieldDescription fieldDescription = KafkaInternalFieldDescription.forColumnName(columnHandle.getName());
-                    switch (fieldDescription) {
-                        case SEGMENT_COUNT_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(totalMessages));
-                            break;
+                    switch (columnHandle.getName()) {
                         case PARTITION_OFFSET_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(messageAndOffset.offset()));
+                            currentRowValuesMap.put(columnHandle, longValueProvider(message.offset()));
                             break;
                         case MESSAGE_FIELD:
                             currentRowValuesMap.put(columnHandle, bytesValueProvider(messageData));
@@ -220,23 +205,24 @@ public class KafkaRecordSet
                         case KEY_LENGTH_FIELD:
                             currentRowValuesMap.put(columnHandle, longValueProvider(keyData.length));
                             break;
+                        case OFFSET_TIMESTAMP_FIELD:
+                            timeStamp *= MICROSECONDS_PER_MILLISECOND;
+                            currentRowValuesMap.put(columnHandle, longValueProvider(timeStamp));
+                            break;
                         case KEY_CORRUPT_FIELD:
-                            currentRowValuesMap.put(columnHandle, booleanValueProvider(!decodedKey.isPresent()));
+                            currentRowValuesMap.put(columnHandle, booleanValueProvider(decodedKey.isEmpty()));
+                            break;
+                        case HEADERS_FIELD:
+                            currentRowValuesMap.put(columnHandle, headerMapValueProvider((MapType) columnHandle.getType(), message.headers()));
                             break;
                         case MESSAGE_CORRUPT_FIELD:
-                            currentRowValuesMap.put(columnHandle, booleanValueProvider(!decodedValue.isPresent()));
+                            currentRowValuesMap.put(columnHandle, booleanValueProvider(decodedValue.isEmpty()));
                             break;
                         case PARTITION_ID_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(split.getPartitionId()));
-                            break;
-                        case SEGMENT_START_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(split.getStart()));
-                            break;
-                        case SEGMENT_END_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(split.getEnd()));
+                            currentRowValuesMap.put(columnHandle, longValueProvider(message.partition()));
                             break;
                         default:
-                            throw new IllegalArgumentException("unknown internal field " + fieldDescription);
+                            throw new IllegalArgumentException("unknown internal field " + columnHandle.getName());
                     }
                 }
             }
@@ -305,47 +291,48 @@ public class KafkaRecordSet
         @Override
         public void close()
         {
+            kafkaConsumer.close();
+        }
+    }
+
+    public static FieldValueProvider headerMapValueProvider(MapType varcharMapType, Headers headers)
+    {
+        Type keyType = varcharMapType.getTypeParameters().get(0);
+        Type valueArrayType = varcharMapType.getTypeParameters().get(1);
+        Type valueType = valueArrayType.getTypeParameters().get(0);
+
+        BlockBuilder mapBlockBuilder = varcharMapType.createBlockBuilder(null, 1);
+        BlockBuilder builder = mapBlockBuilder.beginBlockEntry();
+
+        // Group by keys and collect values as array.
+        Multimap<String, byte[]> headerMap = ArrayListMultimap.create();
+        for (Header header : headers) {
+            headerMap.put(header.key(), header.value());
         }
 
-        private void openFetchRequest()
-        {
-            try {
-                if (messageAndOffsetIterator == null) {
-                    log.debug("Fetching %d bytes from offset %d (%d - %d). %d messages read so far", KAFKA_READ_BUFFER_SIZE, cursorOffset, split.getStart(), split.getEnd(), totalMessages);
-                    FetchRequest req = new FetchRequestBuilder()
-                            .clientId("presto-worker-" + Thread.currentThread().getName())
-                            .addFetch(split.getTopicName(), split.getPartitionId(), cursorOffset, KAFKA_READ_BUFFER_SIZE)
-                            .build();
-
-                    // TODO - this should look at the actual node this is running on and prefer
-                    // that copy if running locally. - look into NodeInfo
-                    SimpleConsumer consumer = consumerManager.getConsumer(split.getLeader());
-
-                    FetchResponse fetchResponse = consumer.fetch(req);
-                    if (fetchResponse.hasError()) {
-                        short errorCode = fetchResponse.errorCode(split.getTopicName(), split.getPartitionId());
-                        log.warn("Fetch response has error: %d", errorCode);
-                        throw new RuntimeException("could not fetch data from Kafka, error code is '" + errorCode + "'");
-                    }
-
-                    messageAndOffsetIterator = fetchResponse.messageSet(split.getTopicName(), split.getPartitionId()).iterator();
-                }
+        for (String headerKey : headerMap.keySet()) {
+            writeNativeValue(keyType, builder, headerKey);
+            BlockBuilder arrayBuilder = builder.beginBlockEntry();
+            for (byte[] value : headerMap.get(headerKey)) {
+                writeNativeValue(valueType, arrayBuilder, value);
             }
-            catch (Exception e) { // Catch all exceptions because Kafka library is written in scala and checked exceptions are not declared in method signature.
-                if (e instanceof PrestoException) {
-                    throw e;
-                }
-                throw new PrestoException(
-                        KAFKA_SPLIT_ERROR,
-                        format(
-                                "Cannot read data from topic '%s', partition '%s', startOffset %s, endOffset %s, leader %s ",
-                                split.getTopicName(),
-                                split.getPartitionId(),
-                                split.getStart(),
-                                split.getEnd(),
-                                split.getLeader()),
-                        e);
-            }
+            builder.closeEntry();
         }
+
+        mapBlockBuilder.closeEntry();
+
+        return new FieldValueProvider() {
+            @Override
+            public boolean isNull()
+            {
+                return false;
+            }
+
+            @Override
+            public Block getBlock()
+            {
+                return varcharMapType.getObject(mapBlockBuilder, 0);
+            }
+        };
     }
 }

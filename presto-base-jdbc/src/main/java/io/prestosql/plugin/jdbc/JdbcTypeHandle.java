@@ -25,24 +25,45 @@ import static java.util.Objects.requireNonNull;
 public final class JdbcTypeHandle
 {
     private final int jdbcType;
-    private final String jdbcTypeName;
+    private final Optional<String> jdbcTypeName;
     private final int columnSize;
-    private final int decimalDigits;
+    private final Optional<Integer> decimalDigits;
     private final Optional<Integer> arrayDimensions;
+    private final Optional<CaseSensitivity> caseSensitivity;
+
+    @Deprecated
+    public JdbcTypeHandle(int jdbcType, Optional<String> jdbcTypeName, int columnSize, int decimalDigits, Optional<Integer> arrayDimensions)
+    {
+        this(jdbcType, jdbcTypeName, columnSize, decimalDigits, arrayDimensions, Optional.empty());
+    }
+
+    @Deprecated
+    public JdbcTypeHandle(
+            @JsonProperty("jdbcType") int jdbcType,
+            @JsonProperty("jdbcTypeName") Optional<String> jdbcTypeName,
+            @JsonProperty("columnSize") int columnSize,
+            @JsonProperty("decimalDigits") int decimalDigits,
+            @JsonProperty("arrayDimensions") Optional<Integer> arrayDimensions,
+            @JsonProperty("caseSensitivity") Optional<CaseSensitivity> caseSensitivity)
+    {
+        this(jdbcType, jdbcTypeName, columnSize, Optional.of(decimalDigits), arrayDimensions, caseSensitivity);
+    }
 
     @JsonCreator
     public JdbcTypeHandle(
             @JsonProperty("jdbcType") int jdbcType,
-            @JsonProperty("jdbcTypeName") String jdbcTypeName,
+            @JsonProperty("jdbcTypeName") Optional<String> jdbcTypeName,
             @JsonProperty("columnSize") int columnSize,
-            @JsonProperty("decimalDigits") int decimalDigits,
-            @JsonProperty("arrayDimensions") Optional<Integer> arrayDimensions)
+            @JsonProperty("decimalDigits") Optional<Integer> decimalDigits,
+            @JsonProperty("arrayDimensions") Optional<Integer> arrayDimensions,
+            @JsonProperty("caseSensitivity") Optional<CaseSensitivity> caseSensitivity)
     {
         this.jdbcType = jdbcType;
         this.jdbcTypeName = requireNonNull(jdbcTypeName, "jdbcTypeName is null");
         this.columnSize = columnSize;
-        this.decimalDigits = decimalDigits;
+        this.decimalDigits = requireNonNull(decimalDigits, "decimalDigits is null");
         this.arrayDimensions = requireNonNull(arrayDimensions, "arrayDimensions is null");
+        this.caseSensitivity = requireNonNull(caseSensitivity, "caseSensitivity is null");
     }
 
     @JsonProperty
@@ -52,7 +73,7 @@ public final class JdbcTypeHandle
     }
 
     @JsonProperty
-    public String getJdbcTypeName()
+    public Optional<String> getJdbcTypeName()
     {
         return jdbcTypeName;
     }
@@ -64,7 +85,7 @@ public final class JdbcTypeHandle
     }
 
     @JsonProperty
-    public int getDecimalDigits()
+    public Optional<Integer> getDecimalDigits()
     {
         return decimalDigits;
     }
@@ -73,6 +94,12 @@ public final class JdbcTypeHandle
     public Optional<Integer> getArrayDimensions()
     {
         return arrayDimensions;
+    }
+
+    @JsonProperty
+    public Optional<CaseSensitivity> getCaseSensitivity()
+    {
+        return caseSensitivity;
     }
 
     @Override
@@ -104,7 +131,7 @@ public final class JdbcTypeHandle
         return toStringHelper(this)
                 .omitNullValues()
                 .add("jdbcType", jdbcType)
-                .add("jdbcTypeName", jdbcTypeName)
+                .add("jdbcTypeName", jdbcTypeName.orElse(null))
                 .add("columnSize", columnSize)
                 .add("decimalDigits", decimalDigits)
                 .add("arrayDimensions", arrayDimensions.orElse(null))

@@ -15,13 +15,26 @@ package io.prestosql.spi.predicate;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.type.Type;
 
+import java.lang.invoke.MethodHandle;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.StringJoiner;
 
+import static io.prestosql.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.prestosql.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.prestosql.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
+import static io.prestosql.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
+import static io.prestosql.spi.function.InvocationConvention.simpleConvention;
+import static io.prestosql.spi.predicate.Utils.TUPLE_DOMAIN_TYPE_OPERATORS;
+import static io.prestosql.spi.predicate.Utils.blockToNativeValue;
+import static io.prestosql.spi.predicate.Utils.handleThrowable;
+import static io.prestosql.spi.predicate.Utils.nativeValueToBlock;
+import static io.prestosql.spi.type.TypeUtils.isFloatingPointNaN;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -40,8 +53,11 @@ public final class Marker
     }
 
     private final Type type;
+    private final MethodHandle comparisonOperator;
     private final Optional<Block> valueBlock;
     private final Bound bound;
+    private final MethodHandle equalOperator;
+    private final MethodHandle hashCodeOperator;
 
     /**
      * LOWER UNBOUNDED is specified with an empty value and a ABOVE bound
@@ -60,20 +76,26 @@ public final class Marker
         if (!type.isOrderable()) {
             throw new IllegalArgumentException("type must be orderable");
         }
-        if (!valueBlock.isPresent() && bound == Bound.EXACTLY) {
-            throw new IllegalArgumentException("Can not be equal to unbounded");
+        if (valueBlock.isEmpty() && bound == Bound.EXACTLY) {
+            throw new IllegalArgumentException("Cannot be equal to unbounded");
         }
         if (valueBlock.isPresent() && valueBlock.get().getPositionCount() != 1) {
             throw new IllegalArgumentException("value block should only have one position");
         }
+        if (valueBlock.isPresent() && isFloatingPointNaN(type, blockToNativeValue(type, valueBlock.get()))) {
+            throw new IllegalArgumentException("cannot use NaN as range bound");
+        }
         this.type = type;
+        this.comparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
         this.valueBlock = valueBlock;
         this.bound = bound;
+        this.equalOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getEqualOperator(type, simpleConvention(NULLABLE_RETURN, BLOCK_POSITION, BLOCK_POSITION));
+        this.hashCodeOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION));
     }
 
     private static Marker create(Type type, Optional<Object> value, Bound bound)
     {
-        return new Marker(type, value.map(object -> Utils.nativeValueToBlock(type, object)), bound);
+        return new Marker(type, value.map(object -> nativeValueToBlock(type, object)), bound);
     }
 
     public static Marker upperUnbounded(Type type)
@@ -123,15 +145,15 @@ public final class Marker
 
     public Object getValue()
     {
-        if (!valueBlock.isPresent()) {
+        if (valueBlock.isEmpty()) {
             throw new IllegalStateException("No value to get");
         }
-        return Utils.blockToNativeValue(type, valueBlock.get());
+        return blockToNativeValue(type, valueBlock.get());
     }
 
     public Object getPrintableValue(ConnectorSession session)
     {
-        if (!valueBlock.isPresent()) {
+        if (valueBlock.isEmpty()) {
             throw new IllegalStateException("No value to get");
         }
         return type.getObjectValue(session, valueBlock.get(), 0);
@@ -145,12 +167,12 @@ public final class Marker
 
     public boolean isUpperUnbounded()
     {
-        return !valueBlock.isPresent() && bound == Bound.BELOW;
+        return valueBlock.isEmpty() && bound == Bound.BELOW;
     }
 
     public boolean isLowerUnbounded()
     {
-        return !valueBlock.isPresent() && bound == Bound.ABOVE;
+        return valueBlock.isEmpty() && bound == Bound.ABOVE;
     }
 
     private void checkTypeCompatibility(Marker marker)
@@ -170,7 +192,7 @@ public final class Marker
         if (isUpperUnbounded() || isLowerUnbounded() || other.isUpperUnbounded() || other.isLowerUnbounded()) {
             return false;
         }
-        if (type.compareTo(valueBlock.get(), 0, other.valueBlock.get(), 0) != 0) {
+        if (compare(valueBlock.get(), other.valueBlock.get()) != 0) {
             return false;
         }
         return (bound == Bound.EXACTLY && other.bound != Bound.EXACTLY) ||
@@ -179,7 +201,7 @@ public final class Marker
 
     public Marker greaterAdjacent()
     {
-        if (!valueBlock.isPresent()) {
+        if (valueBlock.isEmpty()) {
             throw new IllegalStateException("No marker adjacent to unbounded");
         }
         switch (bound) {
@@ -196,7 +218,7 @@ public final class Marker
 
     public Marker lesserAdjacent()
     {
-        if (!valueBlock.isPresent()) {
+        if (valueBlock.isEmpty()) {
             throw new IllegalStateException("No marker adjacent to unbounded");
         }
         switch (bound) {
@@ -229,7 +251,7 @@ public final class Marker
         }
         // INVARIANT: value and o.value are present
 
-        int compare = type.compareTo(valueBlock.get(), 0, o.valueBlock.get(), 0);
+        int compare = compare(valueBlock.get(), o.valueBlock.get());
         if (compare == 0) {
             if (bound == o.bound) {
                 return 0;
@@ -246,6 +268,19 @@ public final class Marker
         return compare;
     }
 
+    public int compare(Block left, Block right)
+    {
+        try {
+            return (int) (long) comparisonOperator.invokeExact(left, 0, right, 0);
+        }
+        catch (RuntimeException | Error e) {
+            throw e;
+        }
+        catch (Throwable throwable) {
+            throw new PrestoException(GENERIC_INTERNAL_ERROR, throwable);
+        }
+    }
+
     public static Marker min(Marker marker1, Marker marker2)
     {
         return marker1.compareTo(marker2) <= 0 ? marker1 : marker2;
@@ -259,11 +294,21 @@ public final class Marker
     @Override
     public int hashCode()
     {
-        int hash = Objects.hash(type, bound);
+        long hash = Objects.hash(type, bound);
         if (valueBlock.isPresent()) {
-            hash = hash * 31 + (int) type.hash(valueBlock.get(), 0);
+            hash = hash * 31 + valueHash();
         }
-        return hash;
+        return (int) hash;
+    }
+
+    private long valueHash()
+    {
+        try {
+            return (long) hashCodeOperator.invokeExact(valueBlock.get(), 0);
+        }
+        catch (Throwable throwable) {
+            throw handleThrowable(throwable);
+        }
     }
 
     @Override
@@ -277,9 +322,34 @@ public final class Marker
         }
         Marker other = (Marker) obj;
         return Objects.equals(this.type, other.type)
-                && Objects.equals(this.bound, other.bound)
+                && this.bound == other.bound
                 && ((this.valueBlock.isPresent()) == (other.valueBlock.isPresent()))
-                && (!this.valueBlock.isPresent() || type.equalTo(this.valueBlock.get(), 0, other.valueBlock.get(), 0));
+                && (this.valueBlock.isEmpty() || valueEqual(this.valueBlock.get(), other.valueBlock.get()));
+    }
+
+    private boolean valueEqual(Block leftBlock, Block rightBlock)
+    {
+        try {
+            return Boolean.TRUE.equals((Boolean) equalOperator.invokeExact(leftBlock, 0, rightBlock, 0));
+        }
+        catch (Throwable throwable) {
+            throw handleThrowable(throwable);
+        }
+    }
+
+    @Override
+    public String toString()
+    {
+        StringJoiner stringJoiner = new StringJoiner(", ", Marker.class.getSimpleName() + "[", "]");
+        if (isLowerUnbounded()) {
+            stringJoiner.add("lower unbounded");
+        }
+        else if (isUpperUnbounded()) {
+            stringJoiner.add("upper unbounded");
+        }
+        stringJoiner.add("bound=" + bound);
+        valueBlock.ifPresent(valueBlock -> stringJoiner.add("valueBlock=..."));
+        return stringJoiner.toString();
     }
 
     public String toString(ConnectorSession session)

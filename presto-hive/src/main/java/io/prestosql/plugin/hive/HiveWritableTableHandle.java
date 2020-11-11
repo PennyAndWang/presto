@@ -13,9 +13,12 @@
  */
 package io.prestosql.plugin.hive;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.metastore.HivePageSinkMetadata;
+import io.prestosql.spi.connector.SchemaTableName;
 
 import java.util.List;
 import java.util.Optional;
@@ -27,33 +30,33 @@ public class HiveWritableTableHandle
     private final String schemaName;
     private final String tableName;
     private final List<HiveColumnHandle> inputColumns;
-    private final String filePrefix;
-    private HivePageSinkMetadata pageSinkMetadata;
+    private final HivePageSinkMetadata pageSinkMetadata;
     private final LocationHandle locationHandle;
     private final Optional<HiveBucketProperty> bucketProperty;
     private final HiveStorageFormat tableStorageFormat;
     private final HiveStorageFormat partitionStorageFormat;
+    private final AcidTransaction transaction;
 
     public HiveWritableTableHandle(
             String schemaName,
             String tableName,
             List<HiveColumnHandle> inputColumns,
-            String filePrefix,
             HivePageSinkMetadata pageSinkMetadata,
             LocationHandle locationHandle,
             Optional<HiveBucketProperty> bucketProperty,
             HiveStorageFormat tableStorageFormat,
-            HiveStorageFormat partitionStorageFormat)
+            HiveStorageFormat partitionStorageFormat,
+            AcidTransaction transaction)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
         this.inputColumns = ImmutableList.copyOf(requireNonNull(inputColumns, "inputColumns is null"));
-        this.filePrefix = requireNonNull(filePrefix, "filePrefix is null");
         this.pageSinkMetadata = requireNonNull(pageSinkMetadata, "pageSinkMetadata is null");
         this.locationHandle = requireNonNull(locationHandle, "locationHandle is null");
         this.bucketProperty = requireNonNull(bucketProperty, "bucketProperty is null");
         this.tableStorageFormat = requireNonNull(tableStorageFormat, "tableStorageFormat is null");
         this.partitionStorageFormat = requireNonNull(partitionStorageFormat, "partitionStorageFormat is null");
+        this.transaction = requireNonNull(transaction);
     }
 
     @JsonProperty
@@ -68,16 +71,16 @@ public class HiveWritableTableHandle
         return tableName;
     }
 
+    @JsonIgnore
+    public SchemaTableName getSchemaTableName()
+    {
+        return new SchemaTableName(schemaName, tableName);
+    }
+
     @JsonProperty
     public List<HiveColumnHandle> getInputColumns()
     {
         return inputColumns;
-    }
-
-    @JsonProperty
-    public String getFilePrefix()
-    {
-        return filePrefix;
     }
 
     @JsonProperty
@@ -108,6 +111,18 @@ public class HiveWritableTableHandle
     public HiveStorageFormat getPartitionStorageFormat()
     {
         return partitionStorageFormat;
+    }
+
+    @JsonProperty
+    public AcidTransaction getTransaction()
+    {
+        return transaction;
+    }
+
+    @JsonIgnore
+    public boolean isTransactional()
+    {
+        return transaction.isTransactional();
     }
 
     @Override

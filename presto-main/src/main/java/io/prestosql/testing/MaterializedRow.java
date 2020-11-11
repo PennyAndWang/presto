@@ -13,8 +13,6 @@
  */
 package io.prestosql.testing;
 
-import com.google.common.base.Preconditions;
-
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.nio.ByteBuffer;
@@ -26,6 +24,8 @@ import java.util.Map.Entry;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkElementIndex;
+import static io.prestosql.testing.MaterializedResult.DEFAULT_PRECISION;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
@@ -36,11 +36,16 @@ import static java.util.stream.Collectors.toList;
 public class MaterializedRow
 {
     private final int precision;
-    private final List<Object> values;
+    private final List<?> values;
 
     public MaterializedRow(int precision, Object... values)
     {
         this(precision, Arrays.asList(requireNonNull(values, "values is null")));
+    }
+
+    public MaterializedRow(List<Object> values)
+    {
+        this(DEFAULT_PRECISION, values);
     }
 
     public MaterializedRow(int precision, List<Object> values)
@@ -48,7 +53,7 @@ public class MaterializedRow
         checkArgument(precision > 0, "Need at least one digit of precision");
         this.precision = precision;
 
-        this.values = (List<Object>) processValue(precision, values);
+        this.values = (List<?>) processValue(precision, values);
     }
 
     private static Object processValue(int precision, Object value)
@@ -66,7 +71,7 @@ public class MaterializedRow
         }
         if (value instanceof Map) {
             Map<Object, Object> map = new HashMap<>();
-            for (Entry<Object, Object> entry : ((Map<Object, Object>) value).entrySet()) {
+            for (Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
                 map.put(processValue(precision, entry.getKey()), processValue(precision, entry.getValue()));
             }
             return map;
@@ -96,7 +101,7 @@ public class MaterializedRow
 
     public Object getField(int field)
     {
-        Preconditions.checkElementIndex(field, values.size());
+        checkElementIndex(field, values.size());
         return processField(values.get(field));
     }
 
@@ -112,7 +117,7 @@ public class MaterializedRow
         }
         if (value instanceof Map) {
             Map<Object, Object> map = new HashMap<>();
-            for (Entry<Object, Object> entry : ((Map<Object, Object>) value).entrySet()) {
+            for (Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
                 map.put(processField(entry.getKey()), processField(entry.getValue()));
             }
             return map;

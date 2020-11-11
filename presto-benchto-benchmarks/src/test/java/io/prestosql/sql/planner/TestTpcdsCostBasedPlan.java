@@ -43,38 +43,32 @@ public class TestTpcdsCostBasedPlan
      * large amount of data.
      */
 
-    public TestTpcdsCostBasedPlan()
+    @Override
+    protected LocalQueryRunner createLocalQueryRunner()
     {
-        super(() -> {
-            String catalog = "local";
-            Session.SessionBuilder sessionBuilder = testSessionBuilder()
-                    .setCatalog(catalog)
-                    .setSchema("sf3000.0")
-                    .setSystemProperty("task_concurrency", "1") // these tests don't handle exchanges from local parallel
-                    .setSystemProperty(JOIN_REORDERING_STRATEGY, JoinReorderingStrategy.AUTOMATIC.name())
-                    .setSystemProperty(JOIN_DISTRIBUTION_TYPE, JoinDistributionType.AUTOMATIC.name());
+        String catalog = "local";
+        Session.SessionBuilder sessionBuilder = testSessionBuilder()
+                .setCatalog(catalog)
+                .setSchema("sf3000.0")
+                .setSystemProperty("task_concurrency", "1") // these tests don't handle exchanges from local parallel
+                .setSystemProperty(JOIN_REORDERING_STRATEGY, JoinReorderingStrategy.AUTOMATIC.name())
+                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, JoinDistributionType.AUTOMATIC.name());
 
-            LocalQueryRunner queryRunner = LocalQueryRunner.queryRunnerWithFakeNodeCountForStats(sessionBuilder.build(), 8);
-            queryRunner.createCatalog(
-                    catalog,
-                    new TpcdsConnectorFactory(1),
-                    ImmutableMap.of());
-            return queryRunner;
-        });
+        LocalQueryRunner queryRunner = LocalQueryRunner.builder(sessionBuilder.build())
+                .withNodeCountForStats(8)
+                .build();
+        queryRunner.createCatalog(
+                catalog,
+                new TpcdsConnectorFactory(1),
+                ImmutableMap.of());
+        return queryRunner;
     }
 
     @Override
     protected Stream<String> getQueryResourcePaths()
     {
         return IntStream.range(1, 100)
-                .boxed()
-                .flatMap(i -> {
-                    String queryId = format("q%02d", i);
-                    if (i == 14 || i == 23 || i == 24 || i == 39) {
-                        return Stream.of(queryId + "_1", queryId + "_2");
-                    }
-                    return Stream.of(queryId);
-                })
+                .mapToObj(i -> format("q%02d", i))
                 .map(queryId -> format("/sql/presto/tpcds/%s.sql", queryId));
     }
 
@@ -86,7 +80,6 @@ public class TestTpcdsCostBasedPlan
         private UpdateTestFiles() {}
 
         public static void main(String[] args)
-                throws Exception
         {
             new TestTpcdsCostBasedPlan().generate();
         }

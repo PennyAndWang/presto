@@ -57,6 +57,11 @@ public final class NodeAssignmentStats
 
     public void addAssignedSplit(InternalNode node)
     {
-        assignmentCount.merge(node, 1, (x, y) -> x + y);
+        assignmentCount.merge(node, 1, Integer::sum);
+    }
+
+    public void removeAssignedSplit(InternalNode node)
+    {
+        assignmentCount.merge(node, 1, (x, y) -> x - y);
     }
 }

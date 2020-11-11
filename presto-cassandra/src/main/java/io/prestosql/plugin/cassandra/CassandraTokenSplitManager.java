@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static io.prestosql.plugin.cassandra.CassandraErrorCode.CASSANDRA_METADATA_ERROR;
@@ -85,7 +86,7 @@ public class CassandraTokenSplitManager
             List<String> endpoints = getEndpoints(keyspace, tokenRange);
             checkState(!endpoints.isEmpty(), "endpoints is empty for token range: %s", tokenRange);
 
-            if (!tokenRing.isPresent()) {
+            if (tokenRing.isEmpty()) {
                 checkState(!tokenRange.isWrappedAround(), "all token ranges must be unwrapped at this step");
                 splits.add(createSplit(tokenRange, endpoints));
                 continue;
@@ -174,6 +175,16 @@ public class CassandraTokenSplitManager
         public List<String> getHosts()
         {
             return hosts;
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .add("startToken", startToken)
+                    .add("endToken", endToken)
+                    .add("hosts", hosts)
+                    .toString();
         }
     }
 }

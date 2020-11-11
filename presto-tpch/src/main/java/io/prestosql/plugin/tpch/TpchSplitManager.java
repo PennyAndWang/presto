@@ -20,8 +20,9 @@ import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplit;
 import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
+import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedSplitSource;
 
 import java.util.Set;
@@ -42,10 +43,13 @@ public class TpchSplitManager
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableLayoutHandle layout, SplitSchedulingStrategy splitSchedulingStrategy)
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            SplitSchedulingStrategy splitSchedulingStrategy,
+            DynamicFilter dynamicFilter)
     {
-        TpchTableLayoutHandle tableLayoutHandle = (TpchTableLayoutHandle) layout;
-
         Set<Node> nodes = nodeManager.getRequiredWorkerNodes();
 
         int totalParts = nodes.size() * splitsPerNode;
@@ -55,7 +59,7 @@ public class TpchSplitManager
         ImmutableList.Builder<ConnectorSplit> splits = ImmutableList.builder();
         for (Node node : nodes) {
             for (int i = 0; i < splitsPerNode; i++) {
-                splits.add(new TpchSplit(partNumber, totalParts, ImmutableList.of(node.getHostAndPort()), tableLayoutHandle.getPredicate()));
+                splits.add(new TpchSplit(partNumber, totalParts, ImmutableList.of(node.getHostAndPort())));
                 partNumber++;
             }
         }

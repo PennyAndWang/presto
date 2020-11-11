@@ -29,7 +29,8 @@ import io.prestosql.plugin.raptor.legacy.metadata.TableColumn;
 import io.prestosql.spi.connector.ConnectorMetadata;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.type.Type;
-import io.prestosql.type.TypeRegistry;
+import io.prestosql.spi.type.TypeOperators;
+import io.prestosql.type.InternalTypeManager;
 import org.skife.jdbi.v2.DBI;
 import org.skife.jdbi.v2.Handle;
 import org.testng.annotations.AfterMethod;
@@ -43,9 +44,11 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.metadata.MetadataUtil.TableMetadataBuilder.tableMetadataBuilder;
 import static io.prestosql.plugin.raptor.legacy.metadata.SchemaDaoUtil.createTablesWithRetry;
 import static io.prestosql.plugin.raptor.legacy.metadata.TestDatabaseShardManager.createShardManager;
@@ -53,7 +56,7 @@ import static io.prestosql.plugin.raptor.legacy.metadata.TestDatabaseShardManage
 import static io.prestosql.plugin.raptor.legacy.storage.organization.ShardOrganizerUtil.getOrganizationEligibleShards;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.DateType.DATE;
-import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
+import static io.prestosql.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.spi.type.VarcharType.createVarcharType;
 import static io.prestosql.testing.TestingConnectorSession.SESSION;
@@ -63,7 +66,7 @@ import static org.testng.Assert.assertEquals;
 public class TestShardOrganizerUtil
 {
     private static final List<ColumnInfo> COLUMNS = ImmutableList.of(
-            new ColumnInfo(1, TIMESTAMP),
+            new ColumnInfo(1, TIMESTAMP_MILLIS),
             new ColumnInfo(2, BIGINT),
             new ColumnInfo(3, VARCHAR));
 
@@ -77,8 +80,8 @@ public class TestShardOrganizerUtil
     @BeforeMethod
     public void setup()
     {
-        dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime());
-        dbi.registerMapper(new TableColumn.Mapper(new TypeRegistry()));
+        dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime() + ThreadLocalRandom.current().nextLong());
+        dbi.registerMapper(new TableColumn.Mapper(new InternalTypeManager(createTestMetadataManager(), new TypeOperators())));
         dummyHandle = dbi.open();
         createTablesWithRetry(dbi);
         dataDir = Files.createTempDir();

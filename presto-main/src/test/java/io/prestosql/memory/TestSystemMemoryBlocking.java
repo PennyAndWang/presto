@@ -30,6 +30,7 @@ import io.prestosql.operator.TaskContext;
 import io.prestosql.spi.HostAddress;
 import io.prestosql.spi.QueryId;
 import io.prestosql.spi.connector.ConnectorSplit;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedPageSource;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.planner.plan.PlanNodeId;
@@ -70,8 +71,8 @@ public class TestSystemMemoryBlocking
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         TaskContext taskContext = TestingTaskContext.builder(executor, scheduledExecutor, TEST_SESSION)
                 .setQueryMaxMemory(DataSize.valueOf("100MB"))
                 .setMemoryPoolSize(DataSize.valueOf("10B"))
@@ -94,10 +95,10 @@ public class TestSystemMemoryBlocking
     public void testTableScanSystemMemoryBlocking()
     {
         PlanNodeId sourceId = new PlanNodeId("source");
-        final List<Type> types = ImmutableList.of(VARCHAR);
+        List<Type> types = ImmutableList.of(VARCHAR);
         TableScanOperator source = new TableScanOperator(driverContext.addOperatorContext(1, new PlanNodeId("test"), "values"),
                 sourceId,
-                (session, split, table, columns) -> new FixedPageSource(rowPagesBuilder(types)
+                (session, split, table, columns, dynamicFilter) -> new FixedPageSource(rowPagesBuilder(types)
                         .addSequencePage(10, 1)
                         .addSequencePage(10, 1)
                         .addSequencePage(10, 1)
@@ -105,7 +106,8 @@ public class TestSystemMemoryBlocking
                         .addSequencePage(10, 1)
                         .build()),
                 TEST_TABLE_HANDLE,
-                ImmutableList.of());
+                ImmutableList.of(),
+                DynamicFilter.EMPTY);
         PageConsumerOperator sink = createSinkOperator(types);
         Driver driver = Driver.createDriver(driverContext, source, sink);
         assertSame(driver.getDriverContext(), driverContext);

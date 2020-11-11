@@ -15,8 +15,9 @@ package io.prestosql.operator;
 
 import com.google.common.collect.ImmutableList;
 import io.prestosql.RowPagesBuilder;
-import io.prestosql.metadata.MetadataManager;
 import io.prestosql.spi.Page;
+import io.prestosql.spi.type.TypeOperators;
+import io.prestosql.type.BlockTypeOperators;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import org.testng.annotations.Test;
 
@@ -314,7 +315,7 @@ public class TestPositionLinks
                 ImmutableList.of(),
                 OptionalInt.empty(),
                 Optional.of(0),
-                MetadataManager.createTestMetadataManager().getFunctionRegistry());
+                new BlockTypeOperators(new TypeOperators()));
     }
 
     private static LongArrayList addresses()

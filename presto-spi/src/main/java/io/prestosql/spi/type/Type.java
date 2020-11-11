@@ -21,6 +21,10 @@ import io.prestosql.spi.block.BlockBuilderStatus;
 import io.prestosql.spi.connector.ConnectorSession;
 
 import java.util.List;
+import java.util.Optional;
+
+import static io.prestosql.spi.type.TypeOperatorDeclaration.NO_TYPE_OPERATOR_DECLARATION;
+import static java.util.Objects.requireNonNull;
 
 public interface Type
 {
@@ -28,8 +32,22 @@ public interface Type
      * Gets the name of this type which must be case insensitive globally unique.
      * The name of a user defined type must be a legal identifier in Presto.
      */
-    @JsonValue
     TypeSignature getTypeSignature();
+
+    @JsonValue
+    default TypeId getTypeId()
+    {
+        return TypeId.of(getTypeSignature().toString());
+    }
+
+    /**
+     * Returns the base name of this type. For simple types, it is the type name.
+     * For complex types (row, array, etc), it is the type name without any parameters.
+     */
+    default String getBaseName()
+    {
+        return getTypeSignature().getBase();
+    }
 
     /**
      * Returns the name of this type that should be displayed to end-users.
@@ -45,6 +63,14 @@ public interface Type
      * True if the type supports compareTo.
      */
     boolean isOrderable();
+
+    /**
+     * Gets the declared type specific operators for this type.
+     */
+    default TypeOperatorDeclaration getTypeOperatorDeclaration(TypeOperators typeOperators)
+    {
+        return NO_TYPE_OPERATOR_DECLARATION;
+    }
 
     /**
      * Gets the Java class type used to represent this value on the stack during
@@ -139,20 +165,34 @@ public interface Type
     void appendTo(Block block, int position, BlockBuilder blockBuilder);
 
     /**
-     * Are the values in the specified blocks at the specified positions equal?
+     * Return the range of possible values for this type, if available.
      * <p>
-     * This method assumes input is not null.
+     * The type of the values must match {@link #getJavaType}
      */
-    boolean equalTo(Block leftBlock, int leftPosition, Block rightBlock, int rightPosition);
+    default Optional<Range> getRange()
+    {
+        return Optional.empty();
+    }
 
-    /**
-     * Calculates the hash code of the value at the specified position in the
-     * specified block.
-     */
-    long hash(Block block, int position);
+    final class Range
+    {
+        private final Object min;
+        private final Object max;
 
-    /**
-     * Compare the values in the specified block at the specified positions equal.
-     */
-    int compareTo(Block leftBlock, int leftPosition, Block rightBlock, int rightPosition);
+        public Range(Object min, Object max)
+        {
+            this.min = requireNonNull(min, "min is null");
+            this.max = requireNonNull(max, "max is null");
+        }
+
+        public Object getMin()
+        {
+            return min;
+        }
+
+        public Object getMax()
+        {
+            return max;
+        }
+    }
 }

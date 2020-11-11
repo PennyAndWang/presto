@@ -16,13 +16,14 @@ package io.prestosql.operator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import io.prestosql.RowPagesBuilder;
-import io.prestosql.metadata.MetadataManager;
 import io.prestosql.spi.Page;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.sql.gen.JoinCompiler;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.testing.MaterializedResult;
+import io.prestosql.type.BlockTypeOperators;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
@@ -56,16 +57,18 @@ public class TestTopNRowNumberOperator
     private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
     private JoinCompiler joinCompiler;
+    private TypeOperators typeOperators = new TypeOperators();
+    private BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
 
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
-        joinCompiler = new JoinCompiler(MetadataManager.createTestMetadataManager());
+        joinCompiler = new JoinCompiler(typeOperators);
     }
 
     @AfterMethod(alwaysRun = true)
@@ -120,7 +123,9 @@ public class TestTopNRowNumberOperator
                 false,
                 Optional.empty(),
                 10,
-                joinCompiler);
+                joinCompiler,
+                typeOperators,
+                blockTypeOperators);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE, BIGINT, BIGINT)
                 .row(0.3, 1L, 1L)
@@ -168,7 +173,9 @@ public class TestTopNRowNumberOperator
                 partial,
                 Optional.empty(),
                 10,
-                joinCompiler);
+                joinCompiler,
+                typeOperators,
+                blockTypeOperators);
 
         MaterializedResult expected;
         if (partial) {
@@ -189,10 +196,11 @@ public class TestTopNRowNumberOperator
         assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
+    @Test
     public void testMemoryReservationYield()
     {
         Type type = BIGINT;
-        List<Page> input = createPagesWithDistinctHashKeys(type, 6_000, 600);
+        List<Page> input = createPagesWithDistinctHashKeys(type, 1_000, 500);
 
         OperatorFactory operatorFactory = new TopNRowNumberOperatorFactory(
                 0,
@@ -207,7 +215,9 @@ public class TestTopNRowNumberOperator
                 false,
                 Optional.empty(),
                 10,
-                joinCompiler);
+                joinCompiler,
+                typeOperators,
+                blockTypeOperators);
 
         // get result with yield; pick a relatively small buffer for heaps
         GroupByHashYieldAssertion.GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(
@@ -227,6 +237,6 @@ public class TestTopNRowNumberOperator
                 count++;
             }
         }
-        assertEquals(count, 6_000 * 600);
+        assertEquals(count, 1_000 * 500);
     }
 }

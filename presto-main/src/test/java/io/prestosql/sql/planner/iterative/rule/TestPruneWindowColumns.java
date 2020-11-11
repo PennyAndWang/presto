@@ -18,9 +18,8 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import io.prestosql.metadata.FunctionKind;
-import io.prestosql.metadata.Signature;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.metadata.ResolvedFunction;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.sql.planner.OrderingScheme;
 import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.assertions.ExpectedValueProvider;
@@ -30,7 +29,6 @@ import io.prestosql.sql.planner.iterative.rule.test.PlanBuilder;
 import io.prestosql.sql.planner.plan.Assignments;
 import io.prestosql.sql.planner.plan.PlanNode;
 import io.prestosql.sql.planner.plan.WindowNode;
-import io.prestosql.sql.tree.FunctionCall;
 import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.sql.tree.WindowFrame;
 import org.testng.annotations.Test;
@@ -42,7 +40,9 @@ import java.util.function.Predicate;
 
 import static com.google.common.base.Predicates.alwaysTrue;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.spi.type.BigintType.BIGINT;
+import static io.prestosql.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.prestosql.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.prestosql.sql.planner.assertions.PlanMatchPattern.functionCall;
 import static io.prestosql.sql.planner.assertions.PlanMatchPattern.strictProject;
@@ -55,14 +55,7 @@ import static io.prestosql.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
 public class TestPruneWindowColumns
         extends BaseRuleTest
 {
-    private static final Signature signature = new Signature(
-            "min",
-            FunctionKind.WINDOW,
-            ImmutableList.of(),
-            ImmutableList.of(),
-            BIGINT.getTypeSignature(),
-            ImmutableList.of(BIGINT.getTypeSignature()),
-            false);
+    private static final ResolvedFunction MIN_FUNCTION = createTestMetadataManager().resolveFunction(QualifiedName.of("min"), fromTypes(BIGINT));
 
     private static final List<String> inputSymbolNameList =
             ImmutableList.of("orderKey", "partitionKey", "hash", "startValue1", "startValue2", "endValue1", "endValue2", "input1", "input2", "unused");
@@ -73,14 +66,16 @@ public class TestPruneWindowColumns
             UNBOUNDED_PRECEDING,
             Optional.of("startValue1"),
             CURRENT_ROW,
-            Optional.of("endValue1"));
+            Optional.of("endValue1"),
+            Optional.of("orderKey"));
 
     private static final ExpectedValueProvider<WindowNode.Frame> frameProvider2 = windowFrame(
             WindowFrame.Type.RANGE,
             UNBOUNDED_PRECEDING,
             Optional.of("startValue2"),
             CURRENT_ROW,
-            Optional.of("endValue2"));
+            Optional.of("endValue2"),
+            Optional.of("orderKey"));
 
     @Test
     public void testWindowNotNeeded()
@@ -115,7 +110,7 @@ public class TestPruneWindowColumns
                                                 .addFunction(
                                                         "output2",
                                                         functionCall("min", ImmutableList.of("input2")),
-                                                        signature,
+                                                        MIN_FUNCTION,
                                                         frameProvider2)
                                                 .hashSymbol("hash"),
                                         strictProject(
@@ -171,12 +166,12 @@ public class TestPruneWindowColumns
                                                 .addFunction(
                                                         "output1",
                                                         functionCall("min", ImmutableList.of("input1")),
-                                                        signature,
+                                                        MIN_FUNCTION,
                                                         frameProvider1)
                                                 .addFunction(
                                                         "output2",
                                                         functionCall("min", ImmutableList.of("input2")),
-                                                        signature,
+                                                        MIN_FUNCTION,
                                                         frameProvider2)
                                                 .hashSymbol("hash"),
                                         strictProject(
@@ -220,28 +215,34 @@ public class TestPruneWindowColumns
                         ImmutableMap.of(
                                 output1,
                                 new WindowNode.Function(
-                                        new FunctionCall(QualifiedName.of("min"), ImmutableList.of(input1.toSymbolReference())),
-                                        signature,
+                                        MIN_FUNCTION,
+                                        ImmutableList.of(input1.toSymbolReference()),
                                         new WindowNode.Frame(
                                                 WindowFrame.Type.RANGE,
                                                 UNBOUNDED_PRECEDING,
                                                 Optional.of(startValue1),
+                                                Optional.of(orderKey),
                                                 CURRENT_ROW,
                                                 Optional.of(endValue1),
+                                                Optional.of(orderKey),
                                                 Optional.of(startValue1.toSymbolReference()),
-                                                Optional.of(endValue2.toSymbolReference()))),
+                                                Optional.of(endValue2.toSymbolReference())),
+                                        false),
                                 output2,
                                 new WindowNode.Function(
-                                        new FunctionCall(QualifiedName.of("min"), ImmutableList.of(input2.toSymbolReference())),
-                                        signature,
+                                        MIN_FUNCTION,
+                                        ImmutableList.of(input2.toSymbolReference()),
                                         new WindowNode.Frame(
                                                 WindowFrame.Type.RANGE,
                                                 UNBOUNDED_PRECEDING,
                                                 Optional.of(startValue2),
+                                                Optional.of(orderKey),
                                                 CURRENT_ROW,
                                                 Optional.of(endValue2),
+                                                Optional.of(orderKey),
                                                 Optional.of(startValue2.toSymbolReference()),
-                                                Optional.of(endValue2.toSymbolReference())))),
+                                                Optional.of(endValue2.toSymbolReference())),
+                                        false)),
                         hash,
                         p.values(
                                 inputs.stream()

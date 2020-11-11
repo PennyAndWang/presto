@@ -22,12 +22,14 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import io.prestosql.Session;
 import io.prestosql.execution.warnings.WarningCollector;
+import io.prestosql.metadata.BoundSignature;
 import io.prestosql.metadata.Metadata;
+import io.prestosql.metadata.ResolvedFunction;
 import io.prestosql.metadata.ResolvedIndex;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.predicate.TupleDomain;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.sql.planner.DomainTranslator;
-import io.prestosql.sql.planner.LiteralEncoder;
 import io.prestosql.sql.planner.PlanNodeIdAllocator;
 import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.SymbolAllocator;
@@ -45,8 +47,10 @@ import io.prestosql.sql.planner.plan.SimplePlanRewriter;
 import io.prestosql.sql.planner.plan.SortNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.planner.plan.WindowNode;
+import io.prestosql.sql.planner.plan.WindowNode.Function;
 import io.prestosql.sql.tree.BooleanLiteral;
 import io.prestosql.sql.tree.Expression;
+import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.sql.tree.SymbolReference;
 import io.prestosql.sql.tree.WindowFrame;
 
@@ -70,10 +74,12 @@ public class IndexJoinOptimizer
         implements PlanOptimizer
 {
     private final Metadata metadata;
+    private final TypeOperators typeOperators;
 
-    public IndexJoinOptimizer(Metadata metadata)
+    public IndexJoinOptimizer(Metadata metadata, TypeOperators typeOperators)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
+        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
     }
 
     @Override
@@ -84,7 +90,7 @@ public class IndexJoinOptimizer
         requireNonNull(symbolAllocator, "symbolAllocator is null");
         requireNonNull(idAllocator, "idAllocator is null");
 
-        return SimplePlanRewriter.rewriteWith(new Rewriter(symbolAllocator, idAllocator, metadata, session), plan, null);
+        return SimplePlanRewriter.rewriteWith(new Rewriter(symbolAllocator, idAllocator, metadata, typeOperators, session), plan, null);
     }
 
     private static class Rewriter
@@ -93,13 +99,20 @@ public class IndexJoinOptimizer
         private final SymbolAllocator symbolAllocator;
         private final PlanNodeIdAllocator idAllocator;
         private final Metadata metadata;
+        private final TypeOperators typeOperators;
         private final Session session;
 
-        private Rewriter(SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, Metadata metadata, Session session)
+        private Rewriter(
+                SymbolAllocator symbolAllocator,
+                PlanNodeIdAllocator idAllocator,
+                Metadata metadata,
+                TypeOperators typeOperators,
+                Session session)
         {
             this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
             this.metadata = requireNonNull(metadata, "metadata is null");
+            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
             this.session = requireNonNull(session, "session is null");
         }
 
@@ -119,11 +132,12 @@ public class IndexJoinOptimizer
                         symbolAllocator,
                         idAllocator,
                         metadata,
+                        typeOperators,
                         session);
                 if (leftIndexCandidate.isPresent()) {
                     // Sanity check that we can trace the path for the index lookup key
                     Map<Symbol, Symbol> trace = IndexKeyTracer.trace(leftIndexCandidate.get(), ImmutableSet.copyOf(leftJoinSymbols));
-                    checkState(!trace.isEmpty() && leftJoinSymbols.containsAll(trace.keySet()));
+                    checkState(!trace.isEmpty());
                 }
 
                 Optional<PlanNode> rightIndexCandidate = IndexSourceRewriter.rewriteWithIndex(
@@ -132,11 +146,12 @@ public class IndexJoinOptimizer
                         symbolAllocator,
                         idAllocator,
                         metadata,
+                        typeOperators,
                         session);
                 if (rightIndexCandidate.isPresent()) {
                     // Sanity check that we can trace the path for the index lookup key
                     Map<Symbol, Symbol> trace = IndexKeyTracer.trace(rightIndexCandidate.get(), ImmutableSet.copyOf(rightJoinSymbols));
-                    checkState(!trace.isEmpty() && rightJoinSymbols.containsAll(trace.keySet()));
+                    checkState(!trace.isEmpty());
                 }
 
                 switch (node.getType()) {
@@ -168,14 +183,14 @@ public class IndexJoinOptimizer
 
                     case LEFT:
                         // We cannot use indices for outer joins until index join supports in-line filtering
-                        if (!node.getFilter().isPresent() && rightIndexCandidate.isPresent()) {
+                        if (node.getFilter().isEmpty() && rightIndexCandidate.isPresent()) {
                             return createIndexJoinWithExpectedOutputs(node.getOutputSymbols(), IndexJoinNode.Type.SOURCE_OUTER, leftRewritten, rightIndexCandidate.get(), createEquiJoinClause(leftJoinSymbols, rightJoinSymbols), idAllocator);
                         }
                         break;
 
                     case RIGHT:
                         // We cannot use indices for outer joins until index join supports in-line filtering
-                        if (!node.getFilter().isPresent() && leftIndexCandidate.isPresent()) {
+                        if (node.getFilter().isEmpty() && leftIndexCandidate.isPresent()) {
                             return createIndexJoinWithExpectedOutputs(node.getOutputSymbols(), IndexJoinNode.Type.SOURCE_OUTER, rightRewritten, leftIndexCandidate.get(), createEquiJoinClause(rightJoinSymbols, leftJoinSymbols), idAllocator);
                         }
                         break;
@@ -189,7 +204,21 @@ public class IndexJoinOptimizer
             }
 
             if (leftRewritten != node.getLeft() || rightRewritten != node.getRight()) {
-                return new JoinNode(node.getId(), node.getType(), leftRewritten, rightRewritten, node.getCriteria(), node.getOutputSymbols(), node.getFilter(), node.getLeftHashSymbol(), node.getRightHashSymbol(), node.getDistributionType(), node.isSpillable());
+                return new JoinNode(
+                        node.getId(),
+                        node.getType(),
+                        leftRewritten,
+                        rightRewritten,
+                        node.getCriteria(),
+                        node.getLeftOutputSymbols(),
+                        node.getRightOutputSymbols(),
+                        node.getFilter(),
+                        node.getLeftHashSymbol(),
+                        node.getRightHashSymbol(),
+                        node.getDistributionType(),
+                        node.isSpillable(),
+                        node.getDynamicFilters(),
+                        node.getReorderJoinStatsAndCost());
             }
             return node;
         }
@@ -226,15 +255,22 @@ public class IndexJoinOptimizer
         private final SymbolAllocator symbolAllocator;
         private final PlanNodeIdAllocator idAllocator;
         private final Metadata metadata;
+        private final TypeOperators typeOperators;
         private final DomainTranslator domainTranslator;
         private final Session session;
 
-        private IndexSourceRewriter(SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, Metadata metadata, Session session)
+        private IndexSourceRewriter(
+                SymbolAllocator symbolAllocator,
+                PlanNodeIdAllocator idAllocator,
+                Metadata metadata,
+                TypeOperators typeOperators,
+                Session session)
         {
             this.metadata = requireNonNull(metadata, "metadata is null");
-            this.domainTranslator = new DomainTranslator(new LiteralEncoder(metadata.getBlockEncodingSerde()));
+            this.domainTranslator = new DomainTranslator(metadata);
             this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
+            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
             this.session = requireNonNull(session, "session is null");
         }
 
@@ -244,10 +280,11 @@ public class IndexJoinOptimizer
                 SymbolAllocator symbolAllocator,
                 PlanNodeIdAllocator idAllocator,
                 Metadata metadata,
+                TypeOperators typeOperators,
                 Session session)
         {
             AtomicBoolean success = new AtomicBoolean();
-            IndexSourceRewriter indexSourceRewriter = new IndexSourceRewriter(symbolAllocator, idAllocator, metadata, session);
+            IndexSourceRewriter indexSourceRewriter = new IndexSourceRewriter(symbolAllocator, idAllocator, metadata, typeOperators, session);
             PlanNode rewritten = SimplePlanRewriter.rewriteWith(indexSourceRewriter, planNode, new Context(lookupSymbols, success));
             if (success.get()) {
                 return Optional.of(rewritten);
@@ -272,6 +309,7 @@ public class IndexJoinOptimizer
         {
             DomainTranslator.ExtractionResult decomposedPredicate = DomainTranslator.fromPredicate(
                     metadata,
+                    typeOperators,
                     session,
                     predicate,
                     symbolAllocator.getTypes());
@@ -289,7 +327,7 @@ public class IndexJoinOptimizer
             Set<ColumnHandle> outputColumns = node.getOutputSymbols().stream().map(node.getAssignments()::get).collect(toImmutableSet());
 
             Optional<ResolvedIndex> optionalResolvedIndex = metadata.resolveIndex(session, node.getTable(), lookupColumns, outputColumns, simplifiedConstraint);
-            if (!optionalResolvedIndex.isPresent()) {
+            if (optionalResolvedIndex.isEmpty()) {
                 // No index available, so give up by returning something
                 return node;
             }
@@ -303,10 +341,10 @@ public class IndexJoinOptimizer
                     node.getTable(),
                     context.getLookupSymbols(),
                     node.getOutputSymbols(),
-                    node.getAssignments(),
-                    simplifiedConstraint);
+                    node.getAssignments());
 
             Expression resultingPredicate = combineConjuncts(
+                    metadata,
                     domainTranslator.toPredicate(resolvedIndex.getUnresolvedTupleDomain().transform(inverseAssignments::get)),
                     decomposedPredicate.getRemainingExpression());
 
@@ -349,8 +387,11 @@ public class IndexJoinOptimizer
         public PlanNode visitWindow(WindowNode node, RewriteContext<Context> context)
         {
             if (!node.getWindowFunctions().values().stream()
-                    .map(function -> function.getFunctionCall().getName())
-                    .allMatch(metadata.getFunctionRegistry()::isAggregationFunction)) {
+                    .map(Function::getResolvedFunction)
+                    .map(ResolvedFunction::getSignature)
+                    .map(BoundSignature::getName)
+                    .map(QualifiedName::of)
+                    .allMatch(metadata::isAggregationFunction)) {
                 return node;
             }
 
@@ -435,7 +476,7 @@ public class IndexJoinOptimizer
 
             public Context(Set<Symbol> lookupSymbols, AtomicBoolean success)
             {
-                checkArgument(!lookupSymbols.isEmpty(), "lookupSymbols can not be empty");
+                checkArgument(!lookupSymbols.isEmpty(), "lookupSymbols cannot be empty");
                 this.lookupSymbols = ImmutableSet.copyOf(requireNonNull(lookupSymbols, "lookupSymbols is null"));
                 this.success = requireNonNull(success, "success is null");
             }
@@ -463,7 +504,7 @@ public class IndexJoinOptimizer
      * underlying IndexSource symbol. Also note that lookup symbols that do not correspond to underlying index source symbols
      * will be omitted from the returned Map.
      */
-    public static class IndexKeyTracer
+    public static final class IndexKeyTracer
     {
         public static Map<Symbol, Symbol> trace(PlanNode node, Set<Symbol> lookupSymbols)
         {

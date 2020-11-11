@@ -46,11 +46,13 @@ public class SimplifyExpressions
         if (expression instanceof SymbolReference) {
             return expression;
         }
-        expression = pushDownNegations(expression);
-        expression = extractCommonPredicates(expression);
         Map<NodeRef<Expression>, Type> expressionTypes = typeAnalyzer.getTypes(session, symbolAllocator.getTypes(), expression);
+        expression = pushDownNegations(metadata, expression, expressionTypes);
+        expression = extractCommonPredicates(metadata, expression);
+        expressionTypes = typeAnalyzer.getTypes(session, symbolAllocator.getTypes(), expression);
         ExpressionInterpreter interpreter = ExpressionInterpreter.expressionOptimizer(expression, metadata, session, expressionTypes);
-        return literalEncoder.toExpression(interpreter.optimize(NoOpSymbolResolver.INSTANCE), expressionTypes.get(NodeRef.of(expression)));
+        Object optimized = interpreter.optimize(NoOpSymbolResolver.INSTANCE);
+        return literalEncoder.toExpression(optimized, expressionTypes.get(NodeRef.of(expression)));
     }
 
     public SimplifyExpressions(Metadata metadata, TypeAnalyzer typeAnalyzer)
@@ -72,7 +74,7 @@ public class SimplifyExpressions
     {
         requireNonNull(metadata, "metadata is null");
         requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-        LiteralEncoder literalEncoder = new LiteralEncoder(metadata.getBlockEncodingSerde());
+        LiteralEncoder literalEncoder = new LiteralEncoder(metadata);
 
         return (expression, context) -> rewrite(expression, context.getSession(), context.getSymbolAllocator(), metadata, literalEncoder, typeAnalyzer);
     }

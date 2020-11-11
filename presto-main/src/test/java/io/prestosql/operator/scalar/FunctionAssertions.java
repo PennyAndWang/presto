@@ -24,15 +24,12 @@ import io.airlift.units.DataSize;
 import io.prestosql.Session;
 import io.prestosql.connector.CatalogName;
 import io.prestosql.execution.Lifespan;
-import io.prestosql.execution.warnings.WarningCollector;
-import io.prestosql.metadata.FunctionListBuilder;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.Split;
-import io.prestosql.metadata.SqlFunction;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.operator.DriverContext;
 import io.prestosql.operator.DriverYieldSignal;
-import io.prestosql.operator.FilterAndProjectOperator.FilterAndProjectOperatorFactory;
+import io.prestosql.operator.FilterAndProjectOperator;
 import io.prestosql.operator.Operator;
 import io.prestosql.operator.OperatorFactory;
 import io.prestosql.operator.ScanFilterAndProjectOperator;
@@ -45,43 +42,37 @@ import io.prestosql.spi.ErrorCodeSupplier;
 import io.prestosql.spi.HostAddress;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PageBuilder;
-import io.prestosql.spi.PrestoException;
-import io.prestosql.spi.StandardErrorCode;
+import io.prestosql.spi.Plugin;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
 import io.prestosql.spi.connector.ConnectorSplit;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedPageSource;
 import io.prestosql.spi.connector.InMemoryRecordSet;
 import io.prestosql.spi.connector.RecordPageSource;
 import io.prestosql.spi.connector.RecordSet;
 import io.prestosql.spi.predicate.Utils;
+import io.prestosql.spi.type.DecimalType;
+import io.prestosql.spi.type.RowType;
 import io.prestosql.spi.type.TimeZoneKey;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.split.PageSourceProvider;
-import io.prestosql.sql.analyzer.ExpressionAnalysis;
 import io.prestosql.sql.analyzer.FeaturesConfig;
-import io.prestosql.sql.analyzer.SemanticErrorCode;
-import io.prestosql.sql.analyzer.SemanticException;
 import io.prestosql.sql.gen.ExpressionCompiler;
-import io.prestosql.sql.parser.SqlParser;
 import io.prestosql.sql.planner.ExpressionInterpreter;
 import io.prestosql.sql.planner.Symbol;
-import io.prestosql.sql.planner.TypeAnalyzer;
 import io.prestosql.sql.planner.TypeProvider;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.sql.relational.RowExpression;
-import io.prestosql.sql.tree.Cast;
 import io.prestosql.sql.tree.DefaultTraversalVisitor;
-import io.prestosql.sql.tree.DereferenceExpression;
 import io.prestosql.sql.tree.Expression;
-import io.prestosql.sql.tree.ExpressionRewriter;
-import io.prestosql.sql.tree.ExpressionTreeRewriter;
 import io.prestosql.sql.tree.NodeRef;
 import io.prestosql.sql.tree.SymbolReference;
 import io.prestosql.testing.LocalQueryRunner;
 import io.prestosql.testing.MaterializedResult;
-import io.prestosql.type.TypeRegistry;
+import io.prestosql.type.BlockTypeOperators;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.openjdk.jol.info.ClassLayout;
@@ -89,8 +80,10 @@ import org.openjdk.jol.info.ClassLayout;
 import java.io.Closeable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -104,36 +97,38 @@ import java.util.function.Supplier;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.testing.Assertions.assertInstanceOf;
-import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.block.BlockAssertions.createBooleansBlock;
 import static io.prestosql.block.BlockAssertions.createDoublesBlock;
 import static io.prestosql.block.BlockAssertions.createIntsBlock;
+import static io.prestosql.block.BlockAssertions.createLongDecimalsBlock;
 import static io.prestosql.block.BlockAssertions.createLongsBlock;
+import static io.prestosql.block.BlockAssertions.createRowBlock;
+import static io.prestosql.block.BlockAssertions.createShortDecimalsBlock;
 import static io.prestosql.block.BlockAssertions.createSlicesBlock;
 import static io.prestosql.block.BlockAssertions.createStringsBlock;
-import static io.prestosql.block.BlockAssertions.createTimestampsWithTimezoneBlock;
+import static io.prestosql.block.BlockAssertions.createTimestampsWithTimeZoneBlock;
 import static io.prestosql.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.prestosql.metadata.FunctionKind.SCALAR;
 import static io.prestosql.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.prestosql.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.prestosql.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DateTimeEncoding.packDateTimeWithZone;
+import static io.prestosql.spi.type.DecimalType.createDecimalType;
+import static io.prestosql.spi.type.Decimals.encodeScaledValue;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
-import static io.prestosql.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
-import static io.prestosql.sql.ParsingUtil.createParsingOptions;
-import static io.prestosql.sql.analyzer.ExpressionAnalyzer.analyzeExpressions;
-import static io.prestosql.sql.planner.iterative.rule.CanonicalizeExpressionRewriter.canonicalizeExpression;
+import static io.prestosql.sql.ExpressionTestUtils.createExpression;
+import static io.prestosql.sql.ExpressionTestUtils.getTypes;
 import static io.prestosql.sql.relational.Expressions.constant;
 import static io.prestosql.sql.relational.SqlToRowExpressionTranslator.translate;
 import static io.prestosql.testing.TestingHandles.TEST_TABLE_HANDLE;
 import static io.prestosql.testing.TestingTaskContext.createTaskContext;
+import static io.prestosql.testing.assertions.PrestoExceptionAssert.assertPrestoExceptionThrownBy;
 import static io.prestosql.type.UnknownType.UNKNOWN;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -148,10 +143,15 @@ import static org.testng.Assert.fail;
 public final class FunctionAssertions
         implements Closeable
 {
-    private static final ExecutorService EXECUTOR = newCachedThreadPool(daemonThreadsNamed("test-%s"));
-    private static final ScheduledExecutorService SCHEDULED_EXECUTOR = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+    private static final ExecutorService EXECUTOR = newCachedThreadPool(daemonThreadsNamed("FunctionAssertions-%s"));
+    private static final ScheduledExecutorService SCHEDULED_EXECUTOR = newScheduledThreadPool(2, daemonThreadsNamed("FunctionAssertions-scheduledExecutor-%s"));
 
-    private static final SqlParser SQL_PARSER = new SqlParser();
+    // Increase the number of fields to generate a wide column
+    private static final int TEST_ROW_NUMBER_OF_FIELDS = 2500;
+    private static final RowType TEST_ROW_TYPE = createTestRowType(TEST_ROW_NUMBER_OF_FIELDS);
+    private static final Block TEST_ROW_DATA = createTestRowData(TEST_ROW_TYPE);
+    private static final DecimalType SHORT_DECIMAL_TYPE = createDecimalType(14);
+    private static final DecimalType LONG_DECIMAL_TYPE = createDecimalType(28);
 
     private static final Page SOURCE_PAGE = new Page(
             createLongsBlock(1234L),
@@ -161,13 +161,16 @@ public final class FunctionAssertions
             createLongsBlock(new DateTime(2001, 8, 22, 3, 4, 5, 321, DateTimeZone.UTC).getMillis()),
             createStringsBlock("%el%"),
             createStringsBlock((String) null),
-            createTimestampsWithTimezoneBlock(packDateTimeWithZone(new DateTime(1970, 1, 1, 0, 1, 0, 999, DateTimeZone.UTC).getMillis(), TimeZoneKey.getTimeZoneKey("Z"))),
+            createTimestampsWithTimeZoneBlock(packDateTimeWithZone(new DateTime(1970, 1, 1, 0, 1, 0, 999, DateTimeZone.UTC).getMillis(), TimeZoneKey.getTimeZoneKey("Z"))),
             createSlicesBlock(Slices.wrappedBuffer((byte) 0xab)),
-            createIntsBlock(1234));
+            createIntsBlock(1234),
+            TEST_ROW_DATA,
+            createShortDecimalsBlock("1234"),
+            createLongDecimalsBlock("1234"));
 
     private static final Page ZERO_CHANNEL_PAGE = new Page(1);
 
-    private static final Map<Symbol, Type> INPUT_TYPES = ImmutableMap.<Symbol, Type>builder()
+    private static final TypeProvider INPUT_TYPES = TypeProvider.copyOf(ImmutableMap.<Symbol, Type>builder()
             .put(new Symbol("bound_long"), BIGINT)
             .put(new Symbol("bound_string"), VARCHAR)
             .put(new Symbol("bound_double"), DOUBLE)
@@ -178,7 +181,10 @@ public final class FunctionAssertions
             .put(new Symbol("bound_timestamp_with_timezone"), TIMESTAMP_WITH_TIME_ZONE)
             .put(new Symbol("bound_binary_literal"), VARBINARY)
             .put(new Symbol("bound_integer"), INTEGER)
-            .build();
+            .put(new Symbol("bound_row"), TEST_ROW_TYPE)
+            .put(new Symbol("bound_short_decimal"), SHORT_DECIMAL_TYPE)
+            .put(new Symbol("bound_long_decimal"), LONG_DECIMAL_TYPE)
+            .build());
 
     private static final Map<Symbol, Integer> INPUT_MAPPING = ImmutableMap.<Symbol, Integer>builder()
             .put(new Symbol("bound_long"), 0)
@@ -191,6 +197,9 @@ public final class FunctionAssertions
             .put(new Symbol("bound_timestamp_with_timezone"), 7)
             .put(new Symbol("bound_binary_literal"), 8)
             .put(new Symbol("bound_integer"), 9)
+            .put(new Symbol("bound_row"), 10)
+            .put(new Symbol("bound_short_decimal"), 11)
+            .put(new Symbol("bound_long_decimal"), 12)
             .build();
 
     private static final PageSourceProvider PAGE_SOURCE_PROVIDER = new TestPageSourceProvider();
@@ -199,7 +208,6 @@ public final class FunctionAssertions
     private final Session session;
     private final LocalQueryRunner runner;
     private final Metadata metadata;
-    private final TypeAnalyzer typeAnalyzer;
     private final ExpressionCompiler compiler;
 
     public FunctionAssertions()
@@ -215,15 +223,11 @@ public final class FunctionAssertions
     public FunctionAssertions(Session session, FeaturesConfig featuresConfig)
     {
         this.session = requireNonNull(session, "session is null");
-        runner = new LocalQueryRunner(session, featuresConfig);
+        runner = LocalQueryRunner.builder(session)
+                .withFeaturesConfig(featuresConfig)
+                .build();
         metadata = runner.getMetadata();
         compiler = runner.getExpressionCompiler();
-        typeAnalyzer = new TypeAnalyzer(SQL_PARSER, metadata);
-    }
-
-    public TypeRegistry getTypeRegistry()
-    {
-        return runner.getTypeManager();
     }
 
     public Metadata getMetadata()
@@ -231,16 +235,19 @@ public final class FunctionAssertions
         return metadata;
     }
 
-    public FunctionAssertions addFunctions(List<? extends SqlFunction> functionInfos)
+    public TypeOperators getTypeOperators()
     {
-        metadata.addFunctions(functionInfos);
-        return this;
+        return runner.getTypeOperators();
     }
 
-    public FunctionAssertions addScalarFunctions(Class<?> clazz)
+    public BlockTypeOperators getBlockTypeOperators()
     {
-        metadata.addFunctions(new FunctionListBuilder().scalars(clazz).getFunctions());
-        return this;
+        return runner.getBlockTypeOperators();
+    }
+
+    public void installPlugin(Plugin plugin)
+    {
+        runner.installPlugin(plugin);
     }
 
     public void assertFunction(String projection, Type expectedType, Object expected)
@@ -264,7 +271,7 @@ public final class FunctionAssertions
         tryEvaluate(expression, expectedType, session);
     }
 
-    private void tryEvaluate(String expression, Type expectedType, Session session)
+    public void tryEvaluate(String expression, Type expectedType, Session session)
     {
         selectUniqueValue(expression, expectedType, session, compiler);
     }
@@ -281,7 +288,7 @@ public final class FunctionAssertions
 
     public void executeProjectionWithFullEngine(String projection)
     {
-        MaterializedResult result = runner.execute("SELECT " + projection);
+        runner.execute("SELECT " + projection);
     }
 
     private Object selectSingleValue(String projection, Type expectedType, ExpressionCompiler compiler)
@@ -295,7 +302,7 @@ public final class FunctionAssertions
         HashSet<Object> resultSet = new HashSet<>(results);
 
         // we should only have a single result
-        assertTrue(resultSet.size() == 1, "Expected only one result unique result, but got " + resultSet);
+        assertEquals(resultSet.size(), 1, "Expected only one result unique result, but got " + resultSet);
 
         return Iterables.getOnlyElement(resultSet);
     }
@@ -313,132 +320,42 @@ public final class FunctionAssertions
         }
     }
 
-    public void assertInvalidFunction(String projection, StandardErrorCode errorCode, String messagePattern)
+    public void assertInvalidFunction(String projection, ErrorCodeSupplier errorCode, String message)
     {
-        try {
-            evaluateInvalid(projection);
-            fail("Expected to throw a PrestoException with message matching " + messagePattern);
-        }
-        catch (PrestoException e) {
-            try {
-                assertEquals(e.getErrorCode(), errorCode.toErrorCode());
-                assertTrue(e.getMessage().equals(messagePattern) || e.getMessage().matches(messagePattern), format("Error message [%s] doesn't match [%s]", e.getMessage(), messagePattern));
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertPrestoExceptionThrownBy(() -> evaluateInvalid(projection))
+                .hasErrorCode(errorCode)
+                .hasMessage(message);
     }
 
-    public void assertInvalidFunction(String projection, String messagePattern)
+    public void assertInvalidFunction(String projection, String message)
     {
-        assertInvalidFunction(projection, INVALID_FUNCTION_ARGUMENT, messagePattern);
-    }
-
-    public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode)
-    {
-        try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode));
-        }
-        catch (SemanticException e) {
-            try {
-                assertEquals(e.getCode(), expectedErrorCode);
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
-    }
-
-    public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode, String message)
-    {
-        try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode));
-        }
-        catch (SemanticException e) {
-            try {
-                assertEquals(e.getCode(), expectedErrorCode);
-                assertEquals(e.getMessage(), message);
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertInvalidFunction(projection, INVALID_FUNCTION_ARGUMENT, message);
     }
 
     public void assertInvalidFunction(String projection, ErrorCodeSupplier expectedErrorCode)
     {
-        try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode.toErrorCode()));
-        }
-        catch (PrestoException e) {
-            try {
-                assertEquals(e.getErrorCode(), expectedErrorCode.toErrorCode());
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertPrestoExceptionThrownBy(() -> evaluateInvalid(projection))
+                .hasErrorCode(expectedErrorCode);
     }
 
     public void assertNumericOverflow(String projection, String message)
     {
-        try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an NUMERIC_VALUE_OUT_OF_RANGE exception with message " + message);
-        }
-        catch (PrestoException e) {
-            try {
-                assertEquals(e.getErrorCode(), NUMERIC_VALUE_OUT_OF_RANGE.toErrorCode());
-                assertEquals(e.getMessage(), message);
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertPrestoExceptionThrownBy(() -> evaluateInvalid(projection))
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage(message);
     }
 
     public void assertInvalidCast(String projection)
     {
-        try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
-        }
-        catch (PrestoException e) {
-            try {
-                assertEquals(e.getErrorCode(), INVALID_CAST_ARGUMENT.toErrorCode());
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertPrestoExceptionThrownBy(() -> evaluateInvalid(projection))
+                .hasErrorCode(INVALID_CAST_ARGUMENT);
     }
 
     public void assertInvalidCast(String projection, String message)
     {
-        try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
-        }
-        catch (PrestoException e) {
-            try {
-                assertEquals(e.getErrorCode(), INVALID_CAST_ARGUMENT.toErrorCode());
-                assertEquals(e.getMessage(), message);
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertPrestoExceptionThrownBy(() -> evaluateInvalid(projection))
+                .hasErrorCode(INVALID_CAST_ARGUMENT)
+                .hasMessage(message);
     }
 
     private void evaluateInvalid(String projection)
@@ -451,7 +368,7 @@ public final class FunctionAssertions
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(session, projection, metadata, TypeProvider.copyOf(INPUT_TYPES));
+        Expression projectionExpression = createExpression(session, projection, metadata, INPUT_TYPES);
         RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
         PageProcessor processor = compiler.compilePageProcessor(Optional.empty(), ImmutableList.of(projectionRowExpression)).get();
 
@@ -517,7 +434,7 @@ public final class FunctionAssertions
             return ((Block) object).getRetainedSizeInBytes();
         }
 
-        Class type = object.getClass();
+        Class<?> type = object.getClass();
         if (type.isArray()) {
             if (type == int[].class) {
                 return sizeOf((int[]) object);
@@ -566,7 +483,7 @@ public final class FunctionAssertions
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(session, projection, metadata, TypeProvider.copyOf(INPUT_TYPES));
+        Expression projectionExpression = createExpression(session, projection, metadata, INPUT_TYPES);
         RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
 
         List<Object> results = new ArrayList<>();
@@ -617,7 +534,7 @@ public final class FunctionAssertions
 
     private RowExpression toRowExpression(Session session, Expression projectionExpression)
     {
-        return toRowExpression(projectionExpression, typeAnalyzer.getTypes(session, TypeProvider.copyOf(INPUT_TYPES), projectionExpression), INPUT_MAPPING);
+        return toRowExpression(projectionExpression, getTypes(session, metadata, INPUT_TYPES, projectionExpression), INPUT_MAPPING);
     }
 
     private Object selectSingleValue(OperatorFactory operatorFactory, Type type, Session session)
@@ -668,7 +585,7 @@ public final class FunctionAssertions
     {
         requireNonNull(filter, "filter is null");
 
-        Expression filterExpression = createExpression(session, filter, metadata, TypeProvider.copyOf(INPUT_TYPES));
+        Expression filterExpression = createExpression(session, filter, metadata, INPUT_TYPES);
         RowExpression filterRowExpression = toRowExpression(session, filterExpression);
 
         List<Boolean> results = new ArrayList<>();
@@ -717,69 +634,6 @@ public final class FunctionAssertions
         }
 
         return results;
-    }
-
-    public static Expression createExpression(String expression, Metadata metadata, TypeProvider symbolTypes)
-    {
-        return createExpression(TEST_SESSION, expression, metadata, symbolTypes);
-    }
-
-    public static Expression createExpression(Session session, String expression, Metadata metadata, TypeProvider symbolTypes)
-    {
-        Expression parsedExpression = SQL_PARSER.createExpression(expression, createParsingOptions(session));
-
-        parsedExpression = rewriteIdentifiersToSymbolReferences(parsedExpression);
-
-        final ExpressionAnalysis analysis = analyzeExpressions(
-                session,
-                metadata,
-                SQL_PARSER,
-                symbolTypes,
-                ImmutableList.of(parsedExpression),
-                ImmutableList.of(),
-                WarningCollector.NOOP,
-                false);
-
-        Expression rewrittenExpression = ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
-        {
-            @Override
-            public Expression rewriteExpression(Expression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
-            {
-                Expression rewrittenExpression = treeRewriter.defaultRewrite(node, context);
-
-                // cast expression if coercion is registered
-                Type coercion = analysis.getCoercion(node);
-                if (coercion != null) {
-                    rewrittenExpression = new Cast(
-                            rewrittenExpression,
-                            coercion.getTypeSignature().toString(),
-                            false,
-                            analysis.isTypeOnlyCoercion(node));
-                }
-
-                return rewrittenExpression;
-            }
-
-            @Override
-            public Expression rewriteDereferenceExpression(DereferenceExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
-            {
-                if (analysis.isColumnReference(node)) {
-                    return rewriteExpression(node, context, treeRewriter);
-                }
-
-                Expression rewrittenExpression = treeRewriter.defaultRewrite(node, context);
-
-                // cast expression if coercion is registered
-                Type coercion = analysis.getCoercion(node);
-                if (coercion != null) {
-                    rewrittenExpression = new Cast(rewrittenExpression, coercion.getTypeSignature().toString());
-                }
-
-                return rewrittenExpression;
-            }
-        }, parsedExpression);
-
-        return canonicalizeExpression(rewrittenExpression);
     }
 
     private static boolean executeFilterWithNoInputColumns(OperatorFactory operatorFactory, Session session)
@@ -836,8 +690,8 @@ public final class FunctionAssertions
 
     private static boolean needsBoundValue(Expression projectionExpression)
     {
-        final AtomicBoolean hasSymbolReferences = new AtomicBoolean();
-        new DefaultTraversalVisitor<Void, Void>()
+        AtomicBoolean hasSymbolReferences = new AtomicBoolean();
+        new DefaultTraversalVisitor<Void>()
         {
             @Override
             protected Void visitSymbolReference(SymbolReference node, Void context)
@@ -852,7 +706,7 @@ public final class FunctionAssertions
 
     private Object interpret(Expression expression, Type expectedType, Session session)
     {
-        Map<NodeRef<Expression>, Type> expressionTypes = typeAnalyzer.getTypes(session, TypeProvider.copyOf(INPUT_TYPES), expression);
+        Map<NodeRef<Expression>, Type> expressionTypes = getTypes(session, metadata, INPUT_TYPES, expression);
         ExpressionInterpreter evaluator = ExpressionInterpreter.expressionInterpreter(expression, metadata, session, expressionTypes);
 
         Object result = evaluator.evaluate(symbol -> {
@@ -897,7 +751,7 @@ public final class FunctionAssertions
         try {
             Supplier<PageProcessor> processor = compiler.compilePageProcessor(Optional.of(filter), ImmutableList.of());
 
-            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(), new DataSize(0, BYTE), 0);
+            return FilterAndProjectOperator.createOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(), DataSize.ofBytes(0), 0);
         }
         catch (Throwable e) {
             if (e instanceof UncheckedExecutionException) {
@@ -911,7 +765,7 @@ public final class FunctionAssertions
     {
         try {
             Supplier<PageProcessor> processor = compiler.compilePageProcessor(filter, ImmutableList.of(projection));
-            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(projection.getType()), new DataSize(0, BYTE), 0);
+            return FilterAndProjectOperator.createOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(projection.getType()), DataSize.ofBytes(0), 0);
         }
         catch (Throwable e) {
             if (e instanceof UncheckedExecutionException) {
@@ -942,8 +796,9 @@ public final class FunctionAssertions
                     pageProcessor,
                     TEST_TABLE_HANDLE,
                     ImmutableList.of(),
+                    DynamicFilter.EMPTY,
                     ImmutableList.of(projection.getType()),
-                    new DataSize(0, BYTE),
+                    DataSize.ofBytes(0),
                     0);
         }
         catch (Throwable e) {
@@ -956,7 +811,7 @@ public final class FunctionAssertions
 
     private RowExpression toRowExpression(Expression projection, Map<NodeRef<Expression>, Type> expressionTypes, Map<Symbol, Integer> layout)
     {
-        return translate(projection, SCALAR, expressionTypes, layout, metadata.getFunctionRegistry(), metadata.getTypeManager(), session, false);
+        return translate(projection, expressionTypes, layout, metadata, session, false);
     }
 
     private static Page getAtMostOnePage(Operator operator, Page sourcePage)
@@ -1016,12 +871,12 @@ public final class FunctionAssertions
             implements PageSourceProvider
     {
         @Override
-        public ConnectorPageSource createPageSource(Session session, Split split, TableHandle table, List<ColumnHandle> columns)
+        public ConnectorPageSource createPageSource(Session session, Split split, TableHandle table, List<ColumnHandle> columns, DynamicFilter dynamicFilter)
         {
             assertInstanceOf(split.getConnectorSplit(), FunctionAssertions.TestSplit.class);
             FunctionAssertions.TestSplit testSplit = (FunctionAssertions.TestSplit) split.getConnectorSplit();
             if (testSplit.isRecordSet()) {
-                RecordSet records = InMemoryRecordSet.builder(ImmutableList.of(BIGINT, VARCHAR, DOUBLE, BOOLEAN, BIGINT, VARCHAR, VARCHAR, TIMESTAMP_WITH_TIME_ZONE, VARBINARY, INTEGER))
+                RecordSet records = InMemoryRecordSet.builder(ImmutableList.of(BIGINT, VARCHAR, DOUBLE, BOOLEAN, BIGINT, VARCHAR, VARCHAR, TIMESTAMP_WITH_TIME_ZONE, VARBINARY, INTEGER, TEST_ROW_TYPE, SHORT_DECIMAL_TYPE, LONG_DECIMAL_TYPE))
                         .addRow(
                                 1234L,
                                 "hello",
@@ -1032,7 +887,10 @@ public final class FunctionAssertions
                                 null,
                                 packDateTimeWithZone(new DateTime(1970, 1, 1, 0, 1, 0, 999, DateTimeZone.UTC).getMillis(), TimeZoneKey.getTimeZoneKey("Z")),
                                 Slices.wrappedBuffer((byte) 0xab),
-                                1234)
+                                1234,
+                                TEST_ROW_DATA.getObject(0, Block.class),
+                                new BigDecimal("1234").unscaledValue().longValue(),
+                                encodeScaledValue(new BigDecimal("1234")))
                         .build();
                 return new RecordPageSource(records);
             }
@@ -1050,6 +908,45 @@ public final class FunctionAssertions
     private static Split createNormalSplit()
     {
         return new Split(new CatalogName("test"), new TestSplit(false), Lifespan.taskWide());
+    }
+
+    private static RowType createTestRowType(int numberOfFields)
+    {
+        Iterator<Type> types = Iterables.<Type>cycle(
+                BIGINT,
+                INTEGER,
+                VARCHAR,
+                DOUBLE,
+                BOOLEAN,
+                VARBINARY,
+                RowType.from(ImmutableList.of(RowType.field("nested_nested_column", VARCHAR)))).iterator();
+
+        List<RowType.Field> fields = new ArrayList<>();
+        for (int fieldIdx = 0; fieldIdx < numberOfFields; fieldIdx++) {
+            fields.add(new RowType.Field(Optional.of("nested_column_" + fieldIdx), types.next()));
+        }
+
+        return RowType.from(fields);
+    }
+
+    private static Block createTestRowData(RowType rowType)
+    {
+        Iterator<Object> values = Iterables.cycle(
+                1234L,
+                34,
+                "hello",
+                12.34d,
+                true,
+                Slices.wrappedBuffer((byte) 0xab),
+                createRowBlock(ImmutableList.of(VARCHAR), Collections.singleton("innerFieldValue").toArray()).getObject(0, Block.class)).iterator();
+
+        int numFields = rowType.getFields().size();
+        Object[] rowValues = new Object[numFields];
+        for (int fieldIdx = 0; fieldIdx < numFields; fieldIdx++) {
+            rowValues[fieldIdx] = values.next();
+        }
+
+        return createRowBlock(rowType.getTypeParameters(), rowValues);
     }
 
     private static class TestSplit

@@ -45,14 +45,14 @@ export class WorkerThreadList extends React.Component {
 
     captureSnapshot() {
         const nodeId = getFirstParameter(window.location.search);
-        $.get('/v1/worker/' + nodeId + '/thread', function (threads) {
+        $.get('/ui/api/worker/' + nodeId + '/thread', function (threads) {
             this.setState({
                 threads: WorkerThreadList.processThreads(threads),
                 snapshotTime: new Date(),
                 initialized: true,
             });
         }.bind(this))
-        .error(function () {
+        .fail(function () {
             this.setState({
                 initialized: true,
             });
@@ -60,7 +60,7 @@ export class WorkerThreadList extends React.Component {
     }
 
     componentDidUpdate() {
-        new Clipboard('.copy-button');
+        new window.ClipboardJS('.copy-button');
     }
 
     static processThreads(threads) {
@@ -71,6 +71,9 @@ export class WorkerThreadList extends React.Component {
         for (let i = 0; i < threads.length; i++) {
             const thread = threads[i];
             if (thread.name.match(QUERY_THREAD_REGEX)) {
+                if (!result[QUERY_THREADS]) {
+                    result[QUERY_THREADS] = [];
+                }
                 result[QUERY_THREADS].push(thread)
             }
 

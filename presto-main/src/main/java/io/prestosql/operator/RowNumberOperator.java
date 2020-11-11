@@ -25,14 +25,15 @@ import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.gen.JoinCompiler;
 import io.prestosql.sql.planner.plan.PlanNodeId;
+import io.prestosql.type.BlockTypeOperators;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.base.Verify.verifyNotNull;
 import static io.prestosql.SystemSessionProperties.isDictionaryAggregationEnabled;
 import static io.prestosql.operator.GroupByHash.createGroupByHash;
 import static io.prestosql.spi.type.BigintType.BIGINT;
@@ -55,6 +56,7 @@ public class RowNumberOperator
         private final int expectedPositions;
         private boolean closed;
         private final JoinCompiler joinCompiler;
+        private final BlockTypeOperators blockTypeOperators;
 
         public RowNumberOperatorFactory(
                 int operatorId,
@@ -66,7 +68,8 @@ public class RowNumberOperator
                 Optional<Integer> maxRowsPerPartition,
                 Optional<Integer> hashChannel,
                 int expectedPositions,
-                JoinCompiler joinCompiler)
+                JoinCompiler joinCompiler,
+                BlockTypeOperators blockTypeOperators)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
@@ -80,6 +83,7 @@ public class RowNumberOperator
             checkArgument(expectedPositions > 0, "expectedPositions < 0");
             this.expectedPositions = expectedPositions;
             this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
+            this.blockTypeOperators = requireNonNull(blockTypeOperators, "blockTypeOperators is null");
         }
 
         @Override
@@ -97,7 +101,8 @@ public class RowNumberOperator
                     maxRowsPerPartition,
                     hashChannel,
                     expectedPositions,
-                    joinCompiler);
+                    joinCompiler,
+                    blockTypeOperators);
         }
 
         @Override
@@ -109,7 +114,7 @@ public class RowNumberOperator
         @Override
         public OperatorFactory duplicate()
         {
-            return new RowNumberOperatorFactory(operatorId, planNodeId, sourceTypes, outputChannels, partitionChannels, partitionTypes, maxRowsPerPartition, hashChannel, expectedPositions, joinCompiler);
+            return new RowNumberOperatorFactory(operatorId, planNodeId, sourceTypes, outputChannels, partitionChannels, partitionTypes, maxRowsPerPartition, hashChannel, expectedPositions, joinCompiler, blockTypeOperators);
         }
     }
 
@@ -142,7 +147,8 @@ public class RowNumberOperator
             Optional<Integer> maxRowsPerPartition,
             Optional<Integer> hashChannel,
             int expectedPositions,
-            JoinCompiler joinCompiler)
+            JoinCompiler joinCompiler,
+            BlockTypeOperators blockTypeOperators)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
         this.localUserMemoryContext = operatorContext.localUserMemoryContext();
@@ -163,7 +169,7 @@ public class RowNumberOperator
         }
         else {
             int[] channels = Ints.toArray(partitionChannels);
-            this.groupByHash = Optional.of(createGroupByHash(partitionTypes, channels, hashChannel, expectedPositions, isDictionaryAggregationEnabled(operatorContext.getSession()), joinCompiler, this::updateMemoryReservation));
+            this.groupByHash = Optional.of(createGroupByHash(partitionTypes, channels, hashChannel, expectedPositions, isDictionaryAggregationEnabled(operatorContext.getSession()), joinCompiler, blockTypeOperators, this::updateMemoryReservation));
         }
     }
 
@@ -265,7 +271,7 @@ public class RowNumberOperator
 
     private boolean processUnfinishedWork()
     {
-        verify(unfinishedWork != null);
+        verifyNotNull(unfinishedWork);
         if (!unfinishedWork.process()) {
             return false;
         }
@@ -277,19 +283,17 @@ public class RowNumberOperator
 
     private boolean isSinglePartition()
     {
-        return !groupByHash.isPresent();
+        return groupByHash.isEmpty();
     }
 
     private Page getRowsWithRowNumber()
     {
-        Block rowNumberBlock = createRowNumberBlock();
-        Block[] sourceBlocks = new Block[inputPage.getChannelCount()];
+        Block[] outputBlocks = new Block[inputPage.getChannelCount() + 1]; // +1 for the row number column
         for (int i = 0; i < outputChannels.length; i++) {
-            sourceBlocks[i] = inputPage.getBlock(outputChannels[i]);
+            outputBlocks[i] = inputPage.getBlock(outputChannels[i]);
         }
 
-        Block[] outputBlocks = Arrays.copyOf(sourceBlocks, sourceBlocks.length + 1); // +1 for the row number column
-        outputBlocks[sourceBlocks.length] = rowNumberBlock;
+        outputBlocks[outputBlocks.length - 1] = createRowNumberBlock();
 
         return new Page(inputPage.getPositionCount(), outputBlocks);
     }

@@ -34,6 +34,7 @@ import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.type.ArrayType;
 import io.prestosql.spi.type.Type;
 import io.prestosql.spi.type.TypeSignature;
@@ -41,6 +42,7 @@ import io.prestosql.split.PageSourceManager;
 import io.prestosql.split.SplitManager;
 import io.prestosql.split.SplitSource;
 import io.prestosql.split.SplitSource.SplitBatch;
+import io.prestosql.sql.planner.FunctionCallBuilder;
 import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.TypeAnalyzer;
 import io.prestosql.sql.planner.iterative.Rule;
@@ -78,11 +80,12 @@ import static io.prestosql.SystemSessionProperties.isSpatialJoinEnabled;
 import static io.prestosql.matching.Capture.newCapture;
 import static io.prestosql.spi.StandardErrorCode.INVALID_SPATIAL_PARTITIONING;
 import static io.prestosql.spi.connector.ConnectorSplitManager.SplitSchedulingStrategy.UNGROUPED_SCHEDULING;
+import static io.prestosql.spi.connector.DynamicFilter.EMPTY;
 import static io.prestosql.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
-import static io.prestosql.spi.type.TypeSignature.parseTypeSignature;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
+import static io.prestosql.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static io.prestosql.sql.planner.ExpressionNodeInliner.replaceExpression;
 import static io.prestosql.sql.planner.SymbolsExtractor.extractUnique;
 import static io.prestosql.sql.planner.plan.JoinNode.Type.INNER;
@@ -147,8 +150,8 @@ import static java.util.Objects.requireNonNull;
  */
 public class ExtractSpatialJoins
 {
-    private static final TypeSignature GEOMETRY_TYPE_SIGNATURE = parseTypeSignature("Geometry");
-    private static final TypeSignature SPHERICAL_GEOGRAPHY_TYPE_SIGNATURE = parseTypeSignature("SphericalGeography");
+    private static final TypeSignature GEOMETRY_TYPE_SIGNATURE = new TypeSignature("Geometry");
+    private static final TypeSignature SPHERICAL_GEOGRAPHY_TYPE_SIGNATURE = new TypeSignature("SphericalGeography");
     private static final String KDB_TREE_TYPENAME = "KdbTree";
 
     private final Metadata metadata;
@@ -339,12 +342,15 @@ public class ExtractSpatialJoins
                 leftNode,
                 newRightNode,
                 joinNode.getCriteria(),
-                joinNode.getOutputSymbols(),
+                joinNode.getLeftOutputSymbols(),
+                joinNode.getRightOutputSymbols(),
                 Optional.of(newFilter),
                 joinNode.getLeftHashSymbol(),
                 joinNode.getRightHashSymbol(),
                 joinNode.getDistributionType(),
-                joinNode.isSpillable());
+                joinNode.isSpillable(),
+                joinNode.getDynamicFilters(),
+                joinNode.getReorderJoinStatsAndCost());
 
         return tryCreateSpatialJoin(context, newJoinNode, newFilter, nodeId, outputSymbols, (FunctionCall) newComparison.getLeft(), Optional.of(newComparison.getRight()), metadata, splitManager, pageSourceManager, typeAnalyzer);
     }
@@ -418,16 +424,20 @@ public class ExtractSpatialJoins
             rightPartitionSymbol = Optional.of(context.getSymbolAllocator().newSymbol("pid", INTEGER));
 
             if (alignment > 0) {
-                newLeftNode = addPartitioningNodes(context, newLeftNode, leftPartitionSymbol.get(), kdbTree.get(), newFirstArgument, Optional.empty());
-                newRightNode = addPartitioningNodes(context, newRightNode, rightPartitionSymbol.get(), kdbTree.get(), newSecondArgument, radius);
+                newLeftNode = addPartitioningNodes(metadata, context, newLeftNode, leftPartitionSymbol.get(), kdbTree.get(), newFirstArgument, Optional.empty());
+                newRightNode = addPartitioningNodes(metadata, context, newRightNode, rightPartitionSymbol.get(), kdbTree.get(), newSecondArgument, radius);
             }
             else {
-                newLeftNode = addPartitioningNodes(context, newLeftNode, leftPartitionSymbol.get(), kdbTree.get(), newSecondArgument, Optional.empty());
-                newRightNode = addPartitioningNodes(context, newRightNode, rightPartitionSymbol.get(), kdbTree.get(), newFirstArgument, radius);
+                newLeftNode = addPartitioningNodes(metadata, context, newLeftNode, leftPartitionSymbol.get(), kdbTree.get(), newSecondArgument, Optional.empty());
+                newRightNode = addPartitioningNodes(metadata, context, newRightNode, rightPartitionSymbol.get(), kdbTree.get(), newFirstArgument, radius);
             }
         }
 
-        Expression newSpatialFunction = new FunctionCall(spatialFunction.getName(), ImmutableList.of(newFirstArgument, newSecondArgument));
+        Expression newSpatialFunction = new FunctionCallBuilder(metadata)
+                .setName(spatialFunction.getName())
+                .addArgument(GEOMETRY_TYPE_SIGNATURE, newFirstArgument)
+                .addArgument(GEOMETRY_TYPE_SIGNATURE, newSecondArgument)
+                .build();
         Expression newFilter = replaceExpression(filter, ImmutableMap.of(spatialFunction, newSpatialFunction));
 
         return Result.ofPlanNode(new SpatialJoinNode(
@@ -456,18 +466,18 @@ public class ExtractSpatialJoins
         ColumnHandle kdbTreeColumn = Iterables.getOnlyElement(visibleColumnHandles);
 
         Optional<KdbTree> kdbTree = Optional.empty();
-        try (SplitSource splitSource = splitManager.getSplits(session, tableHandle, UNGROUPED_SCHEDULING)) {
+        try (SplitSource splitSource = splitManager.getSplits(session, tableHandle, UNGROUPED_SCHEDULING, EMPTY)) {
             while (!Thread.currentThread().isInterrupted()) {
                 SplitBatch splitBatch = getFutureValue(splitSource.getNextBatch(NOT_PARTITIONED, Lifespan.taskWide(), 1000));
                 List<Split> splits = splitBatch.getSplits();
 
                 for (Split split : splits) {
-                    try (ConnectorPageSource pageSource = pageSourceManager.createPageSource(session, split, tableHandle, ImmutableList.of(kdbTreeColumn))) {
+                    try (ConnectorPageSource pageSource = pageSourceManager.createPageSource(session, split, tableHandle, ImmutableList.of(kdbTreeColumn), DynamicFilter.EMPTY)) {
                         do {
                             getFutureValue(pageSource.isBlocked());
                             Page page = pageSource.getNextPage();
                             if (page != null && page.getPositionCount() > 0) {
-                                checkSpatialPartitioningTable(!kdbTree.isPresent(), "Expected exactly one row for table %s, but found more", name);
+                                checkSpatialPartitioningTable(kdbTree.isEmpty(), "Expected exactly one row for table %s, but found more", name);
                                 checkSpatialPartitioningTable(page.getPositionCount() == 1, "Expected exactly one row for table %s, but found %s rows", name, page.getPositionCount());
                                 String kdbTreeJson = VARCHAR.getSlice(page.getBlock(0), 0).toStringUtf8();
                                 try {
@@ -576,19 +586,21 @@ public class ExtractSpatialJoins
         return new ProjectNode(context.getIdAllocator().getNextId(), node, projections.build());
     }
 
-    private static PlanNode addPartitioningNodes(Context context, PlanNode node, Symbol partitionSymbol, KdbTree kdbTree, Expression geometry, Optional<Expression> radius)
+    private static PlanNode addPartitioningNodes(Metadata metadata, Context context, PlanNode node, Symbol partitionSymbol, KdbTree kdbTree, Expression geometry, Optional<Expression> radius)
     {
         Assignments.Builder projections = Assignments.builder();
         for (Symbol outputSymbol : node.getOutputSymbols()) {
             projections.putIdentity(outputSymbol);
         }
 
-        ImmutableList.Builder<Expression> partitioningArguments = ImmutableList.<Expression>builder()
-                .add(new Cast(new StringLiteral(KdbTreeUtils.toJson(kdbTree)), KDB_TREE_TYPENAME))
-                .add(geometry);
-        radius.map(partitioningArguments::add);
+        TypeSignature typeSignature = new TypeSignature(KDB_TREE_TYPENAME);
+        FunctionCallBuilder spatialPartitionsCall = new FunctionCallBuilder(metadata)
+                .setName(QualifiedName.of("spatial_partitions"))
+                .addArgument(typeSignature, new Cast(new StringLiteral(KdbTreeUtils.toJson(kdbTree)), toSqlType(metadata.getType(typeSignature))))
+                .addArgument(GEOMETRY_TYPE_SIGNATURE, geometry);
+        radius.map(value -> spatialPartitionsCall.addArgument(DOUBLE, value));
+        FunctionCall partitioningFunction = spatialPartitionsCall.build();
 
-        FunctionCall partitioningFunction = new FunctionCall(QualifiedName.of("spatial_partitions"), partitioningArguments.build());
         Symbol partitionsSymbol = context.getSymbolAllocator().newSymbol(partitioningFunction, new ArrayType(INTEGER));
         projections.put(partitionsSymbol, partitioningFunction);
 
@@ -596,7 +608,9 @@ public class ExtractSpatialJoins
                 context.getIdAllocator().getNextId(),
                 new ProjectNode(context.getIdAllocator().getNextId(), node, projections.build()),
                 node.getOutputSymbols(),
-                ImmutableMap.of(partitionsSymbol, ImmutableList.of(partitionSymbol)),
+                ImmutableList.of(new UnnestNode.Mapping(partitionsSymbol, ImmutableList.of(partitionSymbol))),
+                Optional.empty(),
+                INNER,
                 Optional.empty());
     }
 

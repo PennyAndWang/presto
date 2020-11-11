@@ -19,27 +19,17 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.prestosql.Session;
 import io.prestosql.connector.CatalogName;
-import io.prestosql.execution.NodeTaskMap;
 import io.prestosql.execution.QueryManagerConfig;
-import io.prestosql.execution.scheduler.LegacyNetworkTopology;
-import io.prestosql.execution.scheduler.NodeScheduler;
-import io.prestosql.execution.scheduler.NodeSchedulerConfig;
 import io.prestosql.execution.warnings.WarningCollector;
-import io.prestosql.metadata.CatalogManager;
-import io.prestosql.metadata.InMemoryNodeManager;
-import io.prestosql.metadata.MetadataManager;
-import io.prestosql.metadata.Signature;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.plugin.tpch.TpchColumnHandle;
+import io.prestosql.plugin.tpch.TpchConnectorFactory;
 import io.prestosql.plugin.tpch.TpchTableHandle;
 import io.prestosql.plugin.tpch.TpchTableLayoutHandle;
 import io.prestosql.security.AllowAllAccessControl;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.predicate.TupleDomain;
-import io.prestosql.spi.type.StandardTypes;
 import io.prestosql.spi.type.Type;
-import io.prestosql.sql.analyzer.FeaturesConfig;
-import io.prestosql.sql.planner.NodePartitioningManager;
 import io.prestosql.sql.planner.Plan;
 import io.prestosql.sql.planner.PlanFragmenter;
 import io.prestosql.sql.planner.SubPlan;
@@ -47,8 +37,11 @@ import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.TypeProvider;
 import io.prestosql.sql.planner.plan.AggregationNode;
 import io.prestosql.sql.planner.plan.Assignments;
+import io.prestosql.sql.planner.plan.EnforceSingleRowNode;
 import io.prestosql.sql.planner.plan.ExchangeNode;
+import io.prestosql.sql.planner.plan.FilterNode;
 import io.prestosql.sql.planner.plan.JoinNode;
+import io.prestosql.sql.planner.plan.LimitNode;
 import io.prestosql.sql.planner.plan.PlanNode;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.sql.planner.plan.ProjectNode;
@@ -56,11 +49,10 @@ import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.planner.plan.UnionNode;
 import io.prestosql.sql.tree.Cast;
 import io.prestosql.sql.tree.Expression;
-import io.prestosql.sql.tree.FunctionCall;
+import io.prestosql.sql.tree.IsNullPredicate;
 import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.sql.tree.SymbolReference;
-import io.prestosql.transaction.TransactionManager;
-import io.prestosql.util.FinalizerService;
+import io.prestosql.testing.LocalQueryRunner;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -74,20 +66,17 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.prestosql.metadata.FunctionKind.AGGREGATE;
-import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.prestosql.plugin.tpch.TpchTransactionHandle.INSTANCE;
 import static io.prestosql.spi.type.BigintType.BIGINT;
-import static io.prestosql.spi.type.TypeSignature.parseTypeSignature;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
+import static io.prestosql.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static io.prestosql.sql.planner.plan.AggregationNode.singleGroupingSet;
 import static io.prestosql.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static io.prestosql.sql.planner.plan.ExchangeNode.Scope.REMOTE;
 import static io.prestosql.sql.planner.plan.ExchangeNode.partitionedExchange;
 import static io.prestosql.sql.planner.plan.ExchangeNode.replicatedExchange;
-import static io.prestosql.testing.TestingSession.createBogusTestingCatalog;
 import static io.prestosql.testing.TestingSession.testSessionBuilder;
-import static io.prestosql.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static io.prestosql.transaction.TransactionBuilder.transaction;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -97,18 +86,14 @@ import static org.testng.Assert.assertTrue;
 public class TestCostCalculator
 {
     private static final int NUMBER_OF_NODES = 10;
-    private static final double AVERAGE_ROW_SIZE = 8.;
-    private static final double IS_NULL_OVERHEAD = 9. / AVERAGE_ROW_SIZE;
-    private static final double OFFSET_AND_IS_NULL_OVERHEAD = 13. / AVERAGE_ROW_SIZE;
+    private static final double AVERAGE_ROW_SIZE = 8.0;
+    private static final double IS_NULL_OVERHEAD = 9.0 / AVERAGE_ROW_SIZE;
+    private static final double OFFSET_AND_IS_NULL_OVERHEAD = 13.0 / AVERAGE_ROW_SIZE;
     private CostCalculator costCalculatorUsingExchanges;
     private CostCalculator costCalculatorWithEstimatedExchanges;
     private PlanFragmenter planFragmenter;
     private Session session;
-    private MetadataManager metadata;
-    private TransactionManager transactionManager;
-    private FinalizerService finalizerService;
-    private NodeScheduler nodeScheduler;
-    private NodePartitioningManager nodePartitioningManager;
+    private LocalQueryRunner localQueryRunner;
 
     @BeforeClass
     public void setUp()
@@ -119,20 +104,10 @@ public class TestCostCalculator
 
         session = testSessionBuilder().setCatalog("tpch").build();
 
-        CatalogManager catalogManager = new CatalogManager();
-        catalogManager.registerCatalog(createBogusTestingCatalog("tpch"));
-        transactionManager = createTestTransactionManager(catalogManager);
-        metadata = createTestMetadataManager(transactionManager, new FeaturesConfig());
+        localQueryRunner = LocalQueryRunner.create(session);
+        localQueryRunner.createCatalog("tpch", new TpchConnectorFactory(), ImmutableMap.of());
 
-        finalizerService = new FinalizerService();
-        finalizerService.start();
-        nodeScheduler = new NodeScheduler(
-                new LegacyNetworkTopology(),
-                new InMemoryNodeManager(),
-                new NodeSchedulerConfig().setIncludeCoordinator(true),
-                new NodeTaskMap(finalizerService));
-        nodePartitioningManager = new NodePartitioningManager(nodeScheduler);
-        planFragmenter = new PlanFragmenter(metadata, nodePartitioningManager, new QueryManagerConfig());
+        planFragmenter = new PlanFragmenter(localQueryRunner.getMetadata(), localQueryRunner.getNodePartitioningManager(), new QueryManagerConfig());
     }
 
     @AfterClass(alwaysRun = true)
@@ -142,13 +117,8 @@ public class TestCostCalculator
         costCalculatorWithEstimatedExchanges = null;
         planFragmenter = null;
         session = null;
-        transactionManager = null;
-        metadata = null;
-        finalizerService.destroy();
-        finalizerService = null;
-        nodeScheduler.stop();
-        nodeScheduler = null;
-        nodePartitioningManager = null;
+        localQueryRunner.close();
+        localQueryRunner = null;
     }
 
     @Test
@@ -179,7 +149,7 @@ public class TestCostCalculator
     public void testProject()
     {
         TableScanNode tableScan = tableScan("ts", "orderkey");
-        PlanNode project = project("project", tableScan, "string", new Cast(new SymbolReference("orderkey"), "STRING"));
+        PlanNode project = project("project", tableScan, "string", new Cast(new SymbolReference("orderkey"), toSqlType(VARCHAR)));
         Map<String, PlanCostEstimate> costs = ImmutableMap.of("ts", cpuCost(1000));
         Map<String, PlanNodeStatsEstimate> stats = ImmutableMap.of(
                 "project", statsEstimate(project, 4000),
@@ -204,6 +174,37 @@ public class TestCostCalculator
                 .network(0);
 
         assertCostHasUnknownComponentsForUnknownStats(project, types);
+    }
+
+    @Test
+    public void testFilter()
+    {
+        TableScanNode tableScan = tableScan("ts", "string");
+        IsNullPredicate expression = new IsNullPredicate(new SymbolReference("string"));
+        FilterNode filter = new FilterNode(new PlanNodeId("filter"), tableScan, expression);
+        Map<String, PlanCostEstimate> costs = ImmutableMap.of("ts", cpuCost(1000));
+        Map<String, PlanNodeStatsEstimate> stats = ImmutableMap.of(
+                "filter", statsEstimate(filter, 4000),
+                "ts", statsEstimate(tableScan, 1000));
+        Map<String, Type> types = ImmutableMap.of(
+                "string", VARCHAR);
+
+        assertCost(filter, costs, stats, types)
+                .cpu(1000 + 1000 * OFFSET_AND_IS_NULL_OVERHEAD)
+                .memory(0)
+                .network(0);
+
+        assertCostEstimatedExchanges(filter, costs, stats, types)
+                .cpu(1000 + 1000 * OFFSET_AND_IS_NULL_OVERHEAD)
+                .memory(0)
+                .network(0);
+
+        assertCostFragmentedPlan(filter, costs, stats, types)
+                .cpu(1000 + 1000 * OFFSET_AND_IS_NULL_OVERHEAD)
+                .memory(0)
+                .network(0);
+
+        assertCostHasUnknownComponentsForUnknownStats(filter, types);
     }
 
     @Test
@@ -506,6 +507,51 @@ public class TestCostCalculator
                 .network(5000 * IS_NULL_OVERHEAD);
     }
 
+    @Test
+    public void testLimit()
+    {
+        TableScanNode ts1 = tableScan("ts1", "orderkey");
+        LimitNode limit = new LimitNode(new PlanNodeId("limit"), ts1, 5, false);
+        Map<String, PlanNodeStatsEstimate> stats = ImmutableMap.of(
+                "ts1", statsEstimate(ts1, 4000),
+                "limit", statsEstimate(ts1, 40)); // 5 * average row size
+        Map<String, PlanCostEstimate> costs = ImmutableMap.of(
+                "ts1", cpuCost(1000));
+        Map<String, Type> types = ImmutableMap.of(
+                "orderkey", BIGINT);
+        // Do not estimate cost other than CPU for limit node.
+        assertCost(limit, costs, stats, types)
+                .cpu(1045) // 1000 + (is null boolean array) + 40
+                .memory(0)
+                .network(0);
+        assertCostEstimatedExchanges(limit, costs, stats, types)
+                .cpu(1045)
+                .memory(0)
+                .network(0);
+    }
+
+    @Test
+    public void testEnforceSingleRow()
+    {
+        TableScanNode ts1 = tableScan("ts1", "orderkey");
+        EnforceSingleRowNode singleRow = new EnforceSingleRowNode(new PlanNodeId("singleRow"), ts1);
+        Map<String, PlanNodeStatsEstimate> stats = ImmutableMap.of(
+                "ts1", statsEstimate(ts1, 4000),
+                "singleRow", statsEstimate(ts1, 8)); // 1 * Average Row Size
+        Map<String, PlanCostEstimate> costs = ImmutableMap.of(
+                "ts1", cpuCost(1000));
+        Map<String, Type> types = ImmutableMap.of(
+                "orderkey", BIGINT);
+        assertCost(singleRow, costs, stats, types)
+                .cpu(1000) // Only count the accumulated cost of source nodes
+                .memory(0)
+                .network(0);
+        assertCostEstimatedExchanges(singleRow, costs, stats, types)
+                .cpu(1000)
+                .memory(0)
+                .network(0);
+    }
+
     private CostAssertionBuilder assertCost(
             PlanNode node,
             Map<String, PlanCostEstimate> costs,
@@ -531,7 +577,7 @@ public class TestCostCalculator
             Map<String, Type> types)
     {
         TypeProvider typeProvider = TypeProvider.copyOf(types.entrySet().stream()
-                .collect(ImmutableMap.toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
+                .collect(toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
         StatsProvider statsProvider = new CachingStatsProvider(statsCalculator(stats), session, typeProvider);
         CostProvider costProvider = new TestingCostProvider(costs, costCalculatorUsingExchanges, statsProvider, session, typeProvider);
         SubPlan subPlan = fragment(new Plan(node, typeProvider, StatsAndCosts.create(node, statsProvider, costProvider)));
@@ -648,13 +694,13 @@ public class TestCostCalculator
                 source -> requireNonNull(costs.apply(source), format("no cost for source: %s", source.getId())),
                 session,
                 TypeProvider.copyOf(types.entrySet().stream()
-                        .collect(ImmutableMap.toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue))));
+                        .collect(toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue))));
     }
 
     private PlanCostEstimate calculateCost(PlanNode node, CostCalculator costCalculator, StatsCalculator statsCalculator, Map<String, Type> types)
     {
         TypeProvider typeProvider = TypeProvider.copyOf(types.entrySet().stream()
-                .collect(ImmutableMap.toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
+                .collect(toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
         StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, typeProvider);
         CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.empty(), session, typeProvider);
         return costProvider.getCost(node);
@@ -663,7 +709,7 @@ public class TestCostCalculator
     private PlanCostEstimate calculateCostFragmentedPlan(PlanNode node, StatsCalculator statsCalculator, Map<String, Type> types)
     {
         TypeProvider typeProvider = TypeProvider.copyOf(types.entrySet().stream()
-                .collect(ImmutableMap.toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
+                .collect(toImmutableMap(entry -> new Symbol(entry.getKey()), Map.Entry::getValue)));
         StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, typeProvider);
         CostProvider costProvider = new CachingCostProvider(costCalculatorUsingExchanges, statsProvider, Optional.empty(), session, typeProvider);
         SubPlan subPlan = fragment(new Plan(node, typeProvider, StatsAndCosts.create(node, statsProvider, costProvider)));
@@ -750,7 +796,8 @@ public class TestCostCalculator
                 new TableHandle(new CatalogName("tpch"), tableHandle, INSTANCE, Optional.of(new TpchTableLayoutHandle(tableHandle, TupleDomain.all()))),
                 symbolsList,
                 assignments.build(),
-                TupleDomain.all());
+                TupleDomain.all(),
+                false);
     }
 
     private PlanNode project(String id, PlanNode source, String symbol, Expression expression)
@@ -764,8 +811,11 @@ public class TestCostCalculator
     private AggregationNode aggregation(String id, PlanNode source)
     {
         AggregationNode.Aggregation aggregation = new AggregationNode.Aggregation(
-                new FunctionCall(QualifiedName.of("count"), ImmutableList.of()),
-                new Signature("count", AGGREGATE, parseTypeSignature(StandardTypes.BIGINT)),
+                localQueryRunner.getMetadata().resolveFunction(QualifiedName.of("count"), ImmutableList.of()),
+                ImmutableList.of(),
+                false,
+                Optional.empty(),
+                Optional.empty(),
                 Optional.empty());
 
         return new AggregationNode(
@@ -774,7 +824,7 @@ public class TestCostCalculator
                 ImmutableMap.of(new Symbol("count"), aggregation),
                 singleGroupingSet(source.getOutputSymbols()),
                 ImmutableList.of(),
-                AggregationNode.Step.FINAL,
+                AggregationNode.Step.SINGLE,
                 Optional.empty(),
                 Optional.empty());
     }
@@ -798,14 +848,14 @@ public class TestCostCalculator
                 left,
                 right,
                 criteria.build(),
-                ImmutableList.<Symbol>builder()
-                        .addAll(left.getOutputSymbols())
-                        .addAll(right.getOutputSymbols())
-                        .build(),
+                left.getOutputSymbols(),
+                right.getOutputSymbols(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.of(distributionType),
+                Optional.empty(),
+                ImmutableMap.of(),
                 Optional.empty());
     }
 
@@ -816,11 +866,11 @@ public class TestCostCalculator
 
     private <T> T inTransaction(Function<Session, T> transactionSessionConsumer)
     {
-        return transaction(transactionManager, new AllowAllAccessControl())
+        return transaction(localQueryRunner.getTransactionManager(), new AllowAllAccessControl())
                 .singleStatement()
                 .execute(session, session -> {
                     // metadata.getCatalogHandle() registers the catalog for the transaction
-                    session.getCatalog().ifPresent(catalog -> metadata.getCatalogHandle(session, catalog));
+                    session.getCatalog().ifPresent(catalog -> localQueryRunner.getMetadata().getCatalogHandle(session, catalog));
                     return transactionSessionConsumer.apply(session);
                 });
     }

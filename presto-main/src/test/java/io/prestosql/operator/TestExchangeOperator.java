@@ -29,6 +29,7 @@ import io.prestosql.operator.ExchangeOperator.ExchangeOperatorFactory;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.type.Type;
 import io.prestosql.split.RemoteSplit;
+import io.prestosql.sql.analyzer.FeaturesConfig.DataIntegrityVerification;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -78,14 +79,16 @@ public class TestExchangeOperator
     @BeforeClass
     public void setUp()
     {
-        scheduler = newScheduledThreadPool(4, daemonThreadsNamed("test-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        scheduler = newScheduledThreadPool(4, daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         pageBufferClientCallbackExecutor = Executors.newSingleThreadExecutor();
         httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers), scheduler);
 
         exchangeClientSupplier = (systemMemoryUsageListener) -> new ExchangeClient(
-                new DataSize(32, MEGABYTE),
-                new DataSize(10, MEGABYTE),
+                "localhost",
+                DataIntegrityVerification.ABORT,
+                DataSize.of(32, MEGABYTE),
+                DataSize.of(10, MEGABYTE),
                 3,
                 new Duration(1, TimeUnit.MINUTES),
                 true,

@@ -31,6 +31,7 @@ import io.prestosql.spi.connector.LocalProperty;
 import io.prestosql.spi.connector.SortingProperty;
 import io.prestosql.spi.predicate.NullableValue;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.sql.planner.DomainTranslator;
 import io.prestosql.sql.planner.ExpressionInterpreter;
 import io.prestosql.sql.planner.NoOpSymbolResolver;
@@ -42,6 +43,7 @@ import io.prestosql.sql.planner.optimizations.ActualProperties.Global;
 import io.prestosql.sql.planner.plan.AggregationNode;
 import io.prestosql.sql.planner.plan.ApplyNode;
 import io.prestosql.sql.planner.plan.AssignUniqueId;
+import io.prestosql.sql.planner.plan.CorrelatedJoinNode;
 import io.prestosql.sql.planner.plan.DeleteNode;
 import io.prestosql.sql.planner.plan.DistinctLimitNode;
 import io.prestosql.sql.planner.plan.EnforceSingleRowNode;
@@ -52,7 +54,6 @@ import io.prestosql.sql.planner.plan.GroupIdNode;
 import io.prestosql.sql.planner.plan.IndexJoinNode;
 import io.prestosql.sql.planner.plan.IndexSourceNode;
 import io.prestosql.sql.planner.plan.JoinNode;
-import io.prestosql.sql.planner.plan.LateralJoinNode;
 import io.prestosql.sql.planner.plan.LimitNode;
 import io.prestosql.sql.planner.plan.MarkDistinctNode;
 import io.prestosql.sql.planner.plan.OutputNode;
@@ -65,6 +66,7 @@ import io.prestosql.sql.planner.plan.SemiJoinNode;
 import io.prestosql.sql.planner.plan.SortNode;
 import io.prestosql.sql.planner.plan.SpatialJoinNode;
 import io.prestosql.sql.planner.plan.StatisticsWriterNode;
+import io.prestosql.sql.planner.plan.TableDeleteNode;
 import io.prestosql.sql.planner.plan.TableFinishNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.planner.plan.TableWriterNode;
@@ -104,21 +106,34 @@ import static io.prestosql.sql.planner.plan.ExchangeNode.Scope.REMOTE;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toMap;
 
-public class PropertyDerivations
+public final class PropertyDerivations
 {
     private PropertyDerivations() {}
 
-    public static ActualProperties derivePropertiesRecursively(PlanNode node, Metadata metadata, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
+    public static ActualProperties derivePropertiesRecursively(
+            PlanNode node,
+            Metadata metadata,
+            TypeOperators typeOperators,
+            Session session,
+            TypeProvider types,
+            TypeAnalyzer typeAnalyzer)
     {
         List<ActualProperties> inputProperties = node.getSources().stream()
-                .map(source -> derivePropertiesRecursively(source, metadata, session, types, typeAnalyzer))
+                .map(source -> derivePropertiesRecursively(source, metadata, typeOperators, session, types, typeAnalyzer))
                 .collect(toImmutableList());
-        return deriveProperties(node, inputProperties, metadata, session, types, typeAnalyzer);
+        return deriveProperties(node, inputProperties, metadata, typeOperators, session, types, typeAnalyzer);
     }
 
-    public static ActualProperties deriveProperties(PlanNode node, List<ActualProperties> inputProperties, Metadata metadata, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
+    public static ActualProperties deriveProperties(
+            PlanNode node,
+            List<ActualProperties> inputProperties,
+            Metadata metadata,
+            TypeOperators typeOperators,
+            Session session,
+            TypeProvider types,
+            TypeAnalyzer typeAnalyzer)
     {
-        ActualProperties output = node.accept(new Visitor(metadata, session, types, typeAnalyzer), inputProperties);
+        ActualProperties output = node.accept(new Visitor(metadata, typeOperators, session, types, typeAnalyzer), inputProperties);
 
         output.getNodePartitioning().ifPresent(partitioning ->
                 verify(node.getOutputSymbols().containsAll(partitioning.getColumns()), "Node-level partitioning properties contain columns not present in node's output"));
@@ -133,22 +148,31 @@ public class PropertyDerivations
         return output;
     }
 
-    public static ActualProperties streamBackdoorDeriveProperties(PlanNode node, List<ActualProperties> inputProperties, Metadata metadata, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
+    public static ActualProperties streamBackdoorDeriveProperties(
+            PlanNode node,
+            List<ActualProperties> inputProperties,
+            Metadata metadata,
+            TypeOperators typeOperators,
+            Session session,
+            TypeProvider types,
+            TypeAnalyzer typeAnalyzer)
     {
-        return node.accept(new Visitor(metadata, session, types, typeAnalyzer), inputProperties);
+        return node.accept(new Visitor(metadata, typeOperators, session, types, typeAnalyzer), inputProperties);
     }
 
     private static class Visitor
             extends PlanVisitor<ActualProperties, List<ActualProperties>>
     {
         private final Metadata metadata;
+        private final TypeOperators typeOperators;
         private final Session session;
         private final TypeProvider types;
         private final TypeAnalyzer typeAnalyzer;
 
-        public Visitor(Metadata metadata, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
+        public Visitor(Metadata metadata, TypeOperators typeOperators, Session session, TypeProvider types, TypeAnalyzer typeAnalyzer)
         {
             this.metadata = metadata;
+            this.typeOperators = typeOperators;
             this.session = session;
             this.types = types;
             this.typeAnalyzer = typeAnalyzer;
@@ -212,7 +236,7 @@ public class PropertyDerivations
         }
 
         @Override
-        public ActualProperties visitLateralJoin(LateralJoinNode node, List<ActualProperties> inputProperties)
+        public ActualProperties visitCorrelatedJoin(CorrelatedJoinNode node, List<ActualProperties> inputProperties)
         {
             throw new IllegalArgumentException("Unexpected node: " + node.getClass().getName());
         }
@@ -231,7 +255,7 @@ public class PropertyDerivations
             // If the input is completely pre-partitioned and sorted, then the original input properties will be respected
             Optional<OrderingScheme> orderingScheme = node.getOrderingScheme();
             if (ImmutableSet.copyOf(node.getPartitionBy()).equals(node.getPrePartitionedInputs())
-                    && (!orderingScheme.isPresent() || node.getPreSortedOrderPrefix() == orderingScheme.get().getOrderBy().size())) {
+                    && (orderingScheme.isEmpty() || node.getPreSortedOrderPrefix() == orderingScheme.get().getOrderBy().size())) {
                 return properties;
             }
 
@@ -373,6 +397,14 @@ public class PropertyDerivations
 
         @Override
         public ActualProperties visitTableFinish(TableFinishNode node, List<ActualProperties> inputProperties)
+        {
+            return ActualProperties.builder()
+                    .global(coordinatorSingleStreamPartition())
+                    .build();
+        }
+
+        @Override
+        public ActualProperties visitTableDelete(TableDeleteNode node, List<ActualProperties> context)
         {
             return ActualProperties.builder()
                     .global(coordinatorSingleStreamPartition())
@@ -593,6 +625,7 @@ public class PropertyDerivations
 
             DomainTranslator.ExtractionResult decomposedPredicate = DomainTranslator.fromPredicate(
                     metadata,
+                    typeOperators,
                     session,
                     node.getPredicate(),
                     types);
@@ -673,12 +706,25 @@ public class PropertyDerivations
         {
             Set<Symbol> passThroughInputs = ImmutableSet.copyOf(node.getReplicateSymbols());
 
-            return Iterables.getOnlyElement(inputProperties).translate(column -> {
+            ActualProperties translatedProperties = Iterables.getOnlyElement(inputProperties).translate(column -> {
                 if (passThroughInputs.contains(column)) {
                     return Optional.of(column);
                 }
                 return Optional.empty();
             });
+
+            switch (node.getJoinType()) {
+                case INNER:
+                case LEFT:
+                    return translatedProperties;
+                case RIGHT:
+                case FULL:
+                    return ActualProperties.builderFrom(translatedProperties)
+                            .local(ImmutableList.of())
+                            .build();
+                default:
+                    throw new UnsupportedOperationException("Unknown UNNEST join type: " + node.getJoinType());
+            }
         }
 
         @Override
@@ -700,7 +746,7 @@ public class PropertyDerivations
             // Globally constant assignments
             Map<ColumnHandle, NullableValue> globalConstants = new HashMap<>();
 
-            extractFixedValues(metadata.getTableProperties(session, node.getTable()).getPredicate())
+            extractFixedValues(layout.getPredicate())
                     .orElse(ImmutableMap.of())
                     .entrySet().stream()
                     .filter(entry -> !entry.getValue().isNull())

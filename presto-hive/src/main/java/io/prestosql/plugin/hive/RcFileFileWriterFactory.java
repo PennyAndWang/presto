@@ -13,8 +13,8 @@
  */
 package io.prestosql.plugin.hive;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableMap;
+import io.prestosql.plugin.hive.acid.AcidTransaction;
 import io.prestosql.plugin.hive.metastore.StorageFormat;
 import io.prestosql.plugin.hive.rcfile.HdfsRcFileDataSource;
 import io.prestosql.rcfile.RcFileDataSource;
@@ -39,23 +39,27 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.function.Supplier;
 
 import static io.prestosql.plugin.hive.HiveErrorCode.HIVE_WRITER_OPEN_ERROR;
 import static io.prestosql.plugin.hive.HiveErrorCode.HIVE_WRITE_VALIDATION_FAILED;
-import static io.prestosql.plugin.hive.HiveType.toHiveTypes;
+import static io.prestosql.plugin.hive.HiveMetadata.PRESTO_QUERY_ID_NAME;
+import static io.prestosql.plugin.hive.HiveMetadata.PRESTO_VERSION_NAME;
+import static io.prestosql.plugin.hive.HiveSessionProperties.getTimestampPrecision;
+import static io.prestosql.plugin.hive.HiveSessionProperties.isRcfileOptimizedWriterValidate;
 import static io.prestosql.plugin.hive.rcfile.RcFilePageSourceFactory.createTextVectorEncoding;
+import static io.prestosql.plugin.hive.util.HiveUtil.getColumnNames;
+import static io.prestosql.plugin.hive.util.HiveUtil.getColumnTypes;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
-import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_TABLE_COLUMNS;
-import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_TABLE_COLUMN_TYPES;
 
 public class RcFileFileWriterFactory
         implements HiveFileWriterFactory
 {
-    private final DateTimeZone hiveStorageTimeZone;
+    private final DateTimeZone timeZone;
     private final HdfsEnvironment hdfsEnvironment;
     private final TypeManager typeManager;
     private final NodeVersion nodeVersion;
@@ -69,31 +73,34 @@ public class RcFileFileWriterFactory
             HiveConfig hiveConfig,
             FileFormatDataSourceStats stats)
     {
-        this(hdfsEnvironment, typeManager, nodeVersion, requireNonNull(hiveConfig, "hiveConfig is null").getDateTimeZone(), stats);
+        this(hdfsEnvironment, typeManager, nodeVersion, requireNonNull(hiveConfig, "hiveConfig is null").getRcfileDateTimeZone(), stats);
     }
 
     public RcFileFileWriterFactory(
             HdfsEnvironment hdfsEnvironment,
             TypeManager typeManager,
             NodeVersion nodeVersion,
-            DateTimeZone hiveStorageTimeZone,
+            DateTimeZone timeZone,
             FileFormatDataSourceStats stats)
     {
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.nodeVersion = requireNonNull(nodeVersion, "nodeVersion is null");
-        this.hiveStorageTimeZone = requireNonNull(hiveStorageTimeZone, "hiveStorageTimeZone is null");
+        this.timeZone = requireNonNull(timeZone, "timeZone is null");
         this.stats = requireNonNull(stats, "stats is null");
     }
 
     @Override
-    public Optional<HiveFileWriter> createFileWriter(
+    public Optional<FileWriter> createFileWriter(
             Path path,
             List<String> inputColumnNames,
             StorageFormat storageFormat,
             Properties schema,
             JobConf configuration,
-            ConnectorSession session)
+            ConnectorSession session,
+            OptionalInt bucketNumber,
+            AcidTransaction transaction,
+            boolean useAcidSchema)
     {
         if (!RCFileOutputFormat.class.getName().equals(storageFormat.getOutputFormat())) {
             return Optional.empty();
@@ -101,10 +108,10 @@ public class RcFileFileWriterFactory
 
         RcFileEncoding rcFileEncoding;
         if (LazyBinaryColumnarSerDe.class.getName().equals(storageFormat.getSerDe())) {
-            rcFileEncoding = new BinaryRcFileEncoding();
+            rcFileEncoding = new BinaryRcFileEncoding(timeZone);
         }
         else if (ColumnarSerDe.class.getName().equals(storageFormat.getSerDe())) {
-            rcFileEncoding = createTextVectorEncoding(schema, hiveStorageTimeZone);
+            rcFileEncoding = createTextVectorEncoding(schema);
         }
         else {
             return Optional.empty();
@@ -114,9 +121,9 @@ public class RcFileFileWriterFactory
 
         // existing tables and partitions may have columns in a different order than the writer is providing, so build
         // an index to rearrange columns in the proper order
-        List<String> fileColumnNames = Splitter.on(',').trimResults().omitEmptyStrings().splitToList(schema.getProperty(META_TABLE_COLUMNS, ""));
-        List<Type> fileColumnTypes = toHiveTypes(schema.getProperty(META_TABLE_COLUMN_TYPES, "")).stream()
-                .map(hiveType -> hiveType.getType(typeManager))
+        List<String> fileColumnNames = getColumnNames(schema);
+        List<Type> fileColumnTypes = getColumnTypes(schema).stream()
+                .map(hiveType -> hiveType.getType(typeManager, getTimestampPrecision(session)))
                 .collect(toList());
 
         int[] fileInputColumnIndexes = fileColumnNames.stream()
@@ -128,7 +135,7 @@ public class RcFileFileWriterFactory
             OutputStream outputStream = fileSystem.create(path);
 
             Optional<Supplier<RcFileDataSource>> validationInputFactory = Optional.empty();
-            if (HiveSessionProperties.isRcfileOptimizedWriterValidate(session)) {
+            if (isRcfileOptimizedWriterValidate(session)) {
                 validationInputFactory = Optional.of(() -> {
                     try {
                         return new HdfsRcFileDataSource(
@@ -156,8 +163,8 @@ public class RcFileFileWriterFactory
                     codecName,
                     fileInputColumnIndexes,
                     ImmutableMap.<String, String>builder()
-                            .put(HiveMetadata.PRESTO_VERSION_NAME, nodeVersion.toString())
-                            .put(HiveMetadata.PRESTO_QUERY_ID_NAME, session.getQueryId())
+                            .put(PRESTO_VERSION_NAME, nodeVersion.toString())
+                            .put(PRESTO_QUERY_ID_NAME, session.getQueryId())
                             .build(),
                     validationInputFactory));
         }

@@ -13,16 +13,59 @@
  */
 package io.prestosql.plugin.hive;
 
-import io.prestosql.tests.AbstractTestJoinQueries;
+import io.prestosql.Session;
+import io.prestosql.execution.DynamicFilterConfig;
+import io.prestosql.operator.OperatorStats;
+import io.prestosql.sql.analyzer.FeaturesConfig;
+import io.prestosql.testing.AbstractTestJoinQueries;
+import io.prestosql.testing.MaterializedResult;
+import io.prestosql.testing.QueryRunner;
+import io.prestosql.testing.ResultWithQueryId;
+import org.testng.annotations.Test;
 
-import static io.airlift.tpch.TpchTable.getTables;
-import static io.prestosql.plugin.hive.HiveQueryRunner.createQueryRunner;
+import static com.google.common.base.Verify.verify;
+import static io.prestosql.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
+import static io.prestosql.tpch.TpchTable.getTables;
+import static org.testng.Assert.assertEquals;
 
+/**
+ * @see TestHiveDistributedJoinQueriesWithoutDynamicFiltering for tests with dynamic filtering enabled
+ */
 public class TestHiveDistributedJoinQueries
         extends AbstractTestJoinQueries
 {
-    public TestHiveDistributedJoinQueries()
+    @Override
+    protected QueryRunner createQueryRunner()
+            throws Exception
     {
-        super(() -> createQueryRunner(getTables()));
+        verify(new DynamicFilterConfig().isEnableDynamicFiltering(), "this class assumes dynamic filtering is enabled by default");
+        return HiveQueryRunner.builder()
+                .setInitialTables(getTables())
+                .build();
+    }
+
+    @Test
+    public void verifyDynamicFilteringEnabled()
+    {
+        assertQuery(
+                "SHOW SESSION LIKE 'enable_dynamic_filtering'",
+                "VALUES ('enable_dynamic_filtering', 'true', 'true', 'boolean', 'Enable dynamic filtering')");
+    }
+
+    @Test
+    public void testJoinWithEmptyBuildSide()
+    {
+        Session session = Session.builder(getSession())
+                .setSystemProperty(JOIN_DISTRIBUTION_TYPE, FeaturesConfig.JoinDistributionType.BROADCAST.name())
+                .build();
+        ResultWithQueryId<MaterializedResult> result = getDistributedQueryRunner().executeWithQueryId(
+                session,
+                "SELECT * FROM lineitem JOIN orders ON lineitem.orderkey = orders.orderkey AND orders.totalprice = 123.4567");
+        assertEquals(result.getResult().getRowCount(), 0);
+
+        OperatorStats probeStats = searchScanFilterAndProjectOperatorStats(result.getQueryId(), "tpch:lineitem");
+        // Probe-side is not scanned at all, due to dynamic filtering:
+        assertEquals(probeStats.getInputPositions(), 0L);
+        assertEquals(probeStats.getDynamicFilterSplitsProcessed(), probeStats.getTotalDrivers());
     }
 }

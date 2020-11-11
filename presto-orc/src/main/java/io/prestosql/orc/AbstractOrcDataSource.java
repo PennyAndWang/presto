@@ -16,7 +16,6 @@ package io.prestosql.orc;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import io.airlift.units.DataSize;
 import io.prestosql.orc.stream.AbstractDiskOrcDataReader;
 import io.prestosql.orc.stream.MemoryOrcDataReader;
 import io.prestosql.orc.stream.OrcDataReader;
@@ -39,25 +38,17 @@ public abstract class AbstractOrcDataSource
         implements OrcDataSource
 {
     private final OrcDataSourceId id;
-    private final long size;
-    private final DataSize maxMergeDistance;
-    private final DataSize maxBufferSize;
-    private final DataSize streamBufferSize;
-    private final boolean lazyReadSmallRanges;
+    private final long estimatedSize;
+    private final OrcReaderOptions options;
     private long readTimeNanos;
     private long readBytes;
 
-    public AbstractOrcDataSource(OrcDataSourceId id, long size, DataSize maxMergeDistance, DataSize maxBufferSize, DataSize streamBufferSize, boolean lazyReadSmallRanges)
+    public AbstractOrcDataSource(OrcDataSourceId id, long estimatedSize, OrcReaderOptions options)
     {
         this.id = requireNonNull(id, "id is null");
 
-        this.size = size;
-        checkArgument(size > 0, "size must be at least 1");
-
-        this.maxMergeDistance = requireNonNull(maxMergeDistance, "maxMergeDistance is null");
-        this.maxBufferSize = requireNonNull(maxBufferSize, "maxBufferSize is null");
-        this.streamBufferSize = requireNonNull(streamBufferSize, "streamBufferSize is null");
-        this.lazyReadSmallRanges = lazyReadSmallRanges;
+        this.estimatedSize = estimatedSize;
+        this.options = requireNonNull(options, "options is null");
     }
 
     protected abstract void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
@@ -82,9 +73,22 @@ public abstract class AbstractOrcDataSource
     }
 
     @Override
-    public final long getSize()
+    public final long getEstimatedSize()
     {
-        return size;
+        return estimatedSize;
+    }
+
+    @Override
+    public Slice readTail(int length)
+            throws IOException
+    {
+        return readFully(estimatedSize - length, length);
+    }
+
+    @Override
+    public long getRetainedSize()
+    {
+        return 0;
     }
 
     @Override
@@ -118,11 +122,11 @@ public abstract class AbstractOrcDataSource
         }
 
         //
-        // Note: this code does not use the Java 8 stream APIs to avoid any extra object allocation
+        // Note: this code does not use the stream APIs to avoid any extra object allocation
         //
 
         // split disk ranges into "big" and "small"
-        long maxReadSizeBytes = maxBufferSize.toBytes();
+        long maxReadSizeBytes = options.getMaxBufferSize().toBytes();
         ImmutableMap.Builder<K, DiskRange> smallRangesBuilder = ImmutableMap.builder();
         ImmutableMap.Builder<K, DiskRange> largeRangesBuilder = ImmutableMap.builder();
         for (Entry<K, DiskRange> entry : diskRanges.entrySet()) {
@@ -151,10 +155,10 @@ public abstract class AbstractOrcDataSource
             return ImmutableMap.of();
         }
 
-        Iterable<DiskRange> mergedRanges = mergeAdjacentDiskRanges(diskRanges.values(), maxMergeDistance, maxBufferSize);
+        Iterable<DiskRange> mergedRanges = mergeAdjacentDiskRanges(diskRanges.values(), options.getMaxMergeDistance(), options.getMaxBufferSize());
 
         ImmutableMap.Builder<K, OrcDataReader> slices = ImmutableMap.builder();
-        if (lazyReadSmallRanges) {
+        if (options.isLazyReadSmallRanges()) {
             for (DiskRange mergedRange : mergedRanges) {
                 LazyBufferLoader mergedRangeLazyLoader = new LazyBufferLoader(mergedRange);
                 for (Entry<K, DiskRange> diskRangeEntry : diskRanges.entrySet()) {
@@ -308,7 +312,7 @@ public abstract class AbstractOrcDataSource
 
         public DiskOrcDataReader(DiskRange diskRange)
         {
-            super(id, requireNonNull(diskRange, "diskRange is null").getLength(), toIntExact(streamBufferSize.toBytes()));
+            super(id, requireNonNull(diskRange, "diskRange is null").getLength(), toIntExact(options.getStreamBufferSize().toBytes()));
             this.diskRange = diskRange;
         }
 

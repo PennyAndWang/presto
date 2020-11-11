@@ -34,6 +34,12 @@ import io.prestosql.sql.planner.plan.StatisticsWriterNode;
 import io.prestosql.sql.planner.plan.TableFinishNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.sql.planner.plan.TableWriterNode;
+import io.prestosql.sql.planner.plan.TableWriterNode.CreateReference;
+import io.prestosql.sql.planner.plan.TableWriterNode.CreateTarget;
+import io.prestosql.sql.planner.plan.TableWriterNode.DeleteTarget;
+import io.prestosql.sql.planner.plan.TableWriterNode.InsertReference;
+import io.prestosql.sql.planner.plan.TableWriterNode.InsertTarget;
+import io.prestosql.sql.planner.plan.TableWriterNode.WriterTarget;
 import io.prestosql.sql.planner.plan.UnionNode;
 
 import java.util.Optional;
@@ -83,7 +89,7 @@ public class BeginTableWrite
             // Part of the plan should be an Optional<StateChangeListener<QueryState>> and this
             // callback can create the table and abort the table creation if the query fails.
 
-            TableWriterNode.WriterTarget writerTarget = context.get().getMaterializedHandle(node.getTarget()).get();
+            WriterTarget writerTarget = context.get().getMaterializedHandle(node.getTarget()).get();
             return new TableWriterNode(
                     node.getId(),
                     node.getSource().accept(this, context),
@@ -92,6 +98,7 @@ public class BeginTableWrite
                     node.getFragmentSymbol(),
                     node.getColumns(),
                     node.getColumnNames(),
+                    node.getNotNullColumnSymbols(),
                     node.getPartitioningScheme(),
                     node.getStatisticsAggregation(),
                     node.getStatisticsAggregationDescriptor());
@@ -100,11 +107,11 @@ public class BeginTableWrite
         @Override
         public PlanNode visitDelete(DeleteNode node, RewriteContext<Context> context)
         {
-            TableWriterNode.DeleteHandle deleteHandle = (TableWriterNode.DeleteHandle) context.get().getMaterializedHandle(node.getTarget()).get();
+            DeleteTarget deleteTarget = (DeleteTarget) context.get().getMaterializedHandle(node.getTarget()).get();
             return new DeleteNode(
                     node.getId(),
-                    rewriteDeleteTableScan(node.getSource(), deleteHandle.getHandle()),
-                    deleteHandle,
+                    rewriteDeleteTableScan(node.getSource(), deleteTarget.getHandle()),
+                    deleteTarget,
                     node.getRowId(),
                     node.getOutputSymbols());
         }
@@ -132,8 +139,8 @@ public class BeginTableWrite
         {
             PlanNode child = node.getSource();
 
-            TableWriterNode.WriterTarget originalTarget = getTarget(child);
-            TableWriterNode.WriterTarget newTarget = createWriterTarget(originalTarget);
+            WriterTarget originalTarget = getTarget(child);
+            WriterTarget newTarget = createWriterTarget(originalTarget);
 
             context.get().addMaterializedHandle(originalTarget, newTarget);
             child = child.accept(this, context);
@@ -147,7 +154,7 @@ public class BeginTableWrite
                     node.getStatisticsAggregationDescriptor());
         }
 
-        public TableWriterNode.WriterTarget getTarget(PlanNode node)
+        public WriterTarget getTarget(PlanNode node)
         {
             if (node instanceof TableWriterNode) {
                 return ((TableWriterNode) node).getTarget();
@@ -156,7 +163,7 @@ public class BeginTableWrite
                 return ((DeleteNode) node).getTarget();
             }
             if (node instanceof ExchangeNode || node instanceof UnionNode) {
-                Set<TableWriterNode.WriterTarget> writerTargets = node.getSources().stream()
+                Set<WriterTarget> writerTargets = node.getSources().stream()
                         .map(this::getTarget)
                         .collect(toSet());
                 return Iterables.getOnlyElement(writerTargets);
@@ -164,21 +171,29 @@ public class BeginTableWrite
             throw new IllegalArgumentException("Invalid child for TableCommitNode: " + node.getClass().getSimpleName());
         }
 
-        private TableWriterNode.WriterTarget createWriterTarget(TableWriterNode.WriterTarget target)
+        private WriterTarget createWriterTarget(WriterTarget target)
         {
             // TODO: begin these operations in pre-execution step, not here
             // TODO: we shouldn't need to store the schemaTableName in the handles, but there isn't a good way to pass this around with the current architecture
-            if (target instanceof TableWriterNode.CreateName) {
-                TableWriterNode.CreateName create = (TableWriterNode.CreateName) target;
-                return new TableWriterNode.CreateHandle(metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()), create.getTableMetadata().getTable());
+            if (target instanceof CreateReference) {
+                CreateReference create = (CreateReference) target;
+                return new CreateTarget(metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()), create.getTableMetadata().getTable());
             }
-            if (target instanceof TableWriterNode.InsertReference) {
-                TableWriterNode.InsertReference insert = (TableWriterNode.InsertReference) target;
-                return new TableWriterNode.InsertHandle(metadata.beginInsert(session, insert.getHandle()), metadata.getTableMetadata(session, insert.getHandle()).getTable());
+            if (target instanceof InsertReference) {
+                InsertReference insert = (InsertReference) target;
+                return new InsertTarget(metadata.beginInsert(session, insert.getHandle(), insert.getColumns()), metadata.getTableMetadata(session, insert.getHandle()).getTable());
             }
-            if (target instanceof TableWriterNode.DeleteHandle) {
-                TableWriterNode.DeleteHandle delete = (TableWriterNode.DeleteHandle) target;
-                return new TableWriterNode.DeleteHandle(metadata.beginDelete(session, delete.getHandle()), delete.getSchemaTableName());
+            if (target instanceof DeleteTarget) {
+                DeleteTarget delete = (DeleteTarget) target;
+                return new DeleteTarget(metadata.beginDelete(session, delete.getHandle()), delete.getSchemaTableName());
+            }
+            if (target instanceof TableWriterNode.RefreshMaterializedViewReference) {
+                TableWriterNode.RefreshMaterializedViewReference refreshMV = (TableWriterNode.RefreshMaterializedViewReference) target;
+                return new TableWriterNode.RefreshMaterializedViewTarget(
+                        refreshMV.getStorageTableHandle(),
+                        metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles()),
+                        metadata.getTableMetadata(session, refreshMV.getStorageTableHandle()).getTable(),
+                        refreshMV.getSourceTableHandles());
             }
             throw new IllegalArgumentException("Unhandled target type: " + target.getClass().getSimpleName());
         }
@@ -192,7 +207,8 @@ public class BeginTableWrite
                         handle,
                         scan.getOutputSymbols(),
                         scan.getAssignments(),
-                        scan.getEnforcedConstraint());
+                        scan.getEnforcedConstraint(),
+                        scan.isForDelete());
             }
 
             if (node instanceof FilterNode) {
@@ -220,17 +236,17 @@ public class BeginTableWrite
 
     public static class Context
     {
-        private Optional<TableWriterNode.WriterTarget> handle = Optional.empty();
-        private Optional<TableWriterNode.WriterTarget> materializedHandle = Optional.empty();
+        private Optional<WriterTarget> handle = Optional.empty();
+        private Optional<WriterTarget> materializedHandle = Optional.empty();
 
-        public void addMaterializedHandle(TableWriterNode.WriterTarget handle, TableWriterNode.WriterTarget materializedHandle)
+        public void addMaterializedHandle(WriterTarget handle, WriterTarget materializedHandle)
         {
-            checkState(!this.handle.isPresent(), "can only have one WriterTarget in a subtree");
+            checkState(this.handle.isEmpty(), "can only have one WriterTarget in a subtree");
             this.handle = Optional.of(handle);
             this.materializedHandle = Optional.of(materializedHandle);
         }
 
-        public Optional<TableWriterNode.WriterTarget> getMaterializedHandle(TableWriterNode.WriterTarget handle)
+        public Optional<WriterTarget> getMaterializedHandle(WriterTarget handle)
         {
             checkState(this.handle.get().equals(handle), "can't find materialized handle for WriterTarget");
             return materializedHandle;

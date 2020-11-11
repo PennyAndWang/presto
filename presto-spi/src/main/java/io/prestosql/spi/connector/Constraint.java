@@ -18,6 +18,7 @@ import io.prestosql.spi.predicate.TupleDomain;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 
 import static java.util.Objects.requireNonNull;
@@ -26,34 +27,56 @@ public class Constraint
 {
     private final TupleDomain<ColumnHandle> summary;
     private final Optional<Predicate<Map<ColumnHandle, NullableValue>>> predicate;
+    private final Optional<Set<ColumnHandle>> predicateColumns;
 
     public static Constraint alwaysTrue()
     {
-        return new Constraint(TupleDomain.all(), Optional.empty());
+        return new Constraint(TupleDomain.all(), Optional.empty(), Optional.empty());
     }
 
     public static Constraint alwaysFalse()
     {
-        return new Constraint(TupleDomain.none(), Optional.of(bindings -> false));
+        return new Constraint(TupleDomain.none(), Optional.of(bindings -> false), Optional.empty());
     }
 
     public Constraint(TupleDomain<ColumnHandle> summary)
     {
-        this(summary, Optional.empty());
+        this(summary, Optional.empty(), Optional.empty());
     }
 
+    /**
+     * @deprecated Use {@link #Constraint(TupleDomain, Predicate, Set)} instead.
+     */
+    @Deprecated
     public Constraint(TupleDomain<ColumnHandle> summary, Predicate<Map<ColumnHandle, NullableValue>> predicate)
     {
-        this(summary, Optional.of(predicate));
+        this(summary, Optional.of(predicate), Optional.empty());
     }
 
+    public Constraint(TupleDomain<ColumnHandle> summary, Predicate<Map<ColumnHandle, NullableValue>> predicate, Set<ColumnHandle> predicateColumns)
+    {
+        this(summary, Optional.of(predicate), Optional.of(predicateColumns));
+    }
+
+    /**
+     * @deprecated Use {@link #Constraint(TupleDomain, Optional, Optional)} instead.
+     */
+    @Deprecated
     public Constraint(TupleDomain<ColumnHandle> summary, Optional<Predicate<Map<ColumnHandle, NullableValue>>> predicate)
     {
-        requireNonNull(summary, "summary is null");
-        requireNonNull(predicate, "predicate is null");
+        this(summary, predicate, Optional.empty());
+    }
 
-        this.summary = summary;
-        this.predicate = predicate;
+    public Constraint(TupleDomain<ColumnHandle> summary, Optional<Predicate<Map<ColumnHandle, NullableValue>>> predicate, Optional<Set<ColumnHandle>> predicateColumns)
+    {
+        this.summary = requireNonNull(summary, "summary is null");
+        this.predicate = requireNonNull(predicate, "predicate is null");
+        this.predicateColumns = requireNonNull(predicateColumns, "predicateColumns is null");
+
+        // TODO remove deprecated constructors and validate that predicate is present *iff* predicateColumns is present
+        if (predicateColumns.isPresent() && predicate.isEmpty()) {
+            throw new IllegalArgumentException("predicateColumns cannot be present when predicate is not present");
+        }
     }
 
     public TupleDomain<ColumnHandle> getSummary()
@@ -64,5 +87,22 @@ public class Constraint
     public Optional<Predicate<Map<ColumnHandle, NullableValue>>> predicate()
     {
         return predicate;
+    }
+
+    /**
+     * @deprecated Use {@link #getPredicateColumns()} instead.
+     */
+    @Deprecated
+    public Optional<Set<ColumnHandle>> getColumns()
+    {
+        return getPredicateColumns();
+    }
+
+    /**
+     * Set of columns the {@link #predicate()} result depends on.
+     */
+    public Optional<Set<ColumnHandle>> getPredicateColumns()
+    {
+        return predicateColumns;
     }
 }

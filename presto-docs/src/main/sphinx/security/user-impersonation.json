@@ -1,0 +1,22 @@
+{
+    "impersonation": [
+        {
+            "original_user": "alice",
+            "new_user": "bob",
+            "allow": false
+        },
+        {
+            "original_user": "bob",
+            "new_user": "alice",
+            "allow": false
+        },
+        {
+            "original_user": "alice|bob",
+            "new_user": ".*"
+        },
+        {
+            "original_user": ".*",
+            "new_user": "test"
+        }
+    ]
+}

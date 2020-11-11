@@ -15,8 +15,8 @@ package io.prestosql.plugin.memory;
 
 import io.airlift.units.Duration;
 import io.prestosql.server.testing.TestingPrestoServer;
-import io.prestosql.tests.AbstractTestQueryFramework;
-import io.prestosql.tests.DistributedQueryRunner;
+import io.prestosql.testing.AbstractTestQueryFramework;
+import io.prestosql.testing.QueryRunner;
 import org.testng.annotations.Test;
 
 import static io.airlift.testing.Assertions.assertLessThan;
@@ -28,9 +28,11 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 public class TestMemoryWorkerCrash
         extends AbstractTestQueryFramework
 {
-    protected TestMemoryWorkerCrash()
+    @Override
+    protected QueryRunner createQueryRunner()
+            throws Exception
     {
-        super(MemoryQueryRunner::createQueryRunner);
+        return MemoryQueryRunner.createQueryRunner();
     }
 
     @Test
@@ -53,8 +55,7 @@ public class TestMemoryWorkerCrash
             throws Exception
     {
         int nodeCount = getNodeCount();
-        DistributedQueryRunner queryRunner = (DistributedQueryRunner) getQueryRunner();
-        TestingPrestoServer worker = queryRunner.getServers().stream()
+        TestingPrestoServer worker = getDistributedQueryRunner().getServers().stream()
                 .filter(server -> !server.isCoordinator())
                 .findAny()
                 .orElseThrow(() -> new IllegalStateException("No worker nodes"));
@@ -65,9 +66,8 @@ public class TestMemoryWorkerCrash
     private void waitForNodes(int numberOfNodes)
             throws InterruptedException
     {
-        DistributedQueryRunner queryRunner = (DistributedQueryRunner) getQueryRunner();
         long start = System.nanoTime();
-        while (queryRunner.getCoordinator().refreshNodes().getActiveNodes().size() < numberOfNodes) {
+        while (getDistributedQueryRunner().getCoordinator().refreshNodes().getActiveNodes().size() < numberOfNodes) {
             assertLessThan(nanosSince(start), new Duration(10, SECONDS));
             MILLISECONDS.sleep(10);
         }

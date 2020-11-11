@@ -28,7 +28,7 @@ import static io.prestosql.matching.Pattern.typeOf;
 import static io.prestosql.matching.Property.optionalProperty;
 import static io.prestosql.matching.Property.property;
 
-public class Patterns
+public final class Patterns
 {
     private Patterns() {}
 
@@ -40,6 +40,11 @@ public class Patterns
     public static Pattern<AggregationNode> aggregation()
     {
         return typeOf(AggregationNode.class);
+    }
+
+    public static Pattern<GroupIdNode> groupId()
+    {
+        return typeOf(GroupIdNode.class);
     }
 
     public static Pattern<ApplyNode> applyNode()
@@ -57,6 +62,11 @@ public class Patterns
         return typeOf(ExchangeNode.class);
     }
 
+    public static Pattern<ExplainAnalyzeNode> explainAnalyze()
+    {
+        return typeOf(ExplainAnalyzeNode.class);
+    }
+
     public static Pattern<EnforceSingleRowNode> enforceSingleRow()
     {
         return typeOf(EnforceSingleRowNode.class);
@@ -65,6 +75,11 @@ public class Patterns
     public static Pattern<FilterNode> filter()
     {
         return typeOf(FilterNode.class);
+    }
+
+    public static Pattern<IndexJoinNode> indexJoin()
+    {
+        return typeOf(IndexJoinNode.class);
     }
 
     public static Pattern<IndexSourceNode> indexSource()
@@ -82,9 +97,14 @@ public class Patterns
         return typeOf(SpatialJoinNode.class);
     }
 
-    public static Pattern<LateralJoinNode> lateralJoin()
+    public static Pattern<CorrelatedJoinNode> correlatedJoin()
     {
-        return typeOf(LateralJoinNode.class);
+        return typeOf(CorrelatedJoinNode.class);
+    }
+
+    public static Pattern<OffsetNode> offset()
+    {
+        return typeOf(OffsetNode.class);
     }
 
     public static Pattern<LimitNode> limit()
@@ -152,6 +172,11 @@ public class Patterns
         return typeOf(ValuesNode.class);
     }
 
+    public static Pattern<UnnestNode> unnest()
+    {
+        return typeOf(UnnestNode.class);
+    }
+
     public static Pattern<WindowNode> window()
     {
         return typeOf(WindowNode.class);
@@ -160,6 +185,26 @@ public class Patterns
     public static Pattern<RowNumberNode> rowNumber()
     {
         return typeOf(RowNumberNode.class);
+    }
+
+    public static Pattern<TopNRowNumberNode> topNRowNumber()
+    {
+        return typeOf(TopNRowNumberNode.class);
+    }
+
+    public static Pattern<DistinctLimitNode> distinctLimit()
+    {
+        return typeOf(DistinctLimitNode.class);
+    }
+
+    public static Pattern<IntersectNode> intersect()
+    {
+        return typeOf(IntersectNode.class);
+    }
+
+    public static Pattern<ExceptNode> except()
+    {
+        return typeOf(ExceptNode.class);
     }
 
     public static Property<PlanNode, Lookup, PlanNode> source()
@@ -180,11 +225,11 @@ public class Patterns
         return property(
                 "sources",
                 (PlanNode node, Lookup lookup) -> node.getSources().stream()
-                        .map(source -> lookup.resolve(source))
+                        .map(lookup::resolve)
                         .collect(toImmutableList()));
     }
 
-    public static class Aggregation
+    public static final class Aggregation
     {
         public static Property<AggregationNode, Lookup, List<Symbol>> groupingColumns()
         {
@@ -197,7 +242,7 @@ public class Patterns
         }
     }
 
-    public static class Apply
+    public static final class Apply
     {
         public static Property<ApplyNode, Lookup, List<Symbol>> correlation()
         {
@@ -205,7 +250,7 @@ public class Patterns
         }
     }
 
-    public static class Exchange
+    public static final class Exchange
     {
         public static Property<ExchangeNode, Lookup, ExchangeNode.Scope> scope()
         {
@@ -213,7 +258,7 @@ public class Patterns
         }
     }
 
-    public static class Join
+    public static final class Join
     {
         public static Property<JoinNode, Lookup, JoinNode.Type> type()
         {
@@ -221,25 +266,25 @@ public class Patterns
         }
     }
 
-    public static class LateralJoin
+    public static final class CorrelatedJoin
     {
-        public static Property<LateralJoinNode, Lookup, List<Symbol>> correlation()
+        public static Property<CorrelatedJoinNode, Lookup, List<Symbol>> correlation()
         {
-            return property("correlation", LateralJoinNode::getCorrelation);
+            return property("correlation", CorrelatedJoinNode::getCorrelation);
         }
 
-        public static Property<LateralJoinNode, Lookup, PlanNode> subquery()
+        public static Property<CorrelatedJoinNode, Lookup, PlanNode> subquery()
         {
-            return property("subquery", LateralJoinNode::getSubquery);
+            return property("subquery", (node, context) -> context.resolve(node.getSubquery()));
         }
 
-        public static Property<LateralJoinNode, Lookup, Expression> filter()
+        public static Property<CorrelatedJoinNode, Lookup, Expression> filter()
         {
-            return property("filter", LateralJoinNode::getFilter);
+            return property("filter", CorrelatedJoinNode::getFilter);
         }
     }
 
-    public static class Limit
+    public static final class Limit
     {
         public static Property<LimitNode, Lookup, Long> count()
         {
@@ -247,7 +292,7 @@ public class Patterns
         }
     }
 
-    public static class Sample
+    public static final class Sample
     {
         public static Property<SampleNode, Lookup, Double> sampleRatio()
         {
@@ -260,7 +305,7 @@ public class Patterns
         }
     }
 
-    public static class TopN
+    public static final class TopN
     {
         public static Property<TopNNode, Lookup, TopNNode.Step> step()
         {
@@ -273,7 +318,7 @@ public class Patterns
         }
     }
 
-    public static class Values
+    public static final class Values
     {
         public static Property<ValuesNode, Lookup, List<List<Expression>>> rows()
         {
@@ -281,7 +326,7 @@ public class Patterns
         }
     }
 
-    public static class SemiJoin
+    public static final class SemiJoin
     {
         public static Property<SemiJoinNode, Lookup, PlanNode> getSource()
         {

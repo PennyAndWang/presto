@@ -16,8 +16,9 @@ package io.prestosql.plugin.kudu;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
+import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedSplitSource;
 
 import javax.inject.Inject;
@@ -38,14 +39,24 @@ public class KuduSplitManager
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle,
-            ConnectorSession session, ConnectorTableLayoutHandle layout,
-            SplitSchedulingStrategy splitSchedulingStrategy)
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            SplitSchedulingStrategy splitSchedulingStrategy,
+            DynamicFilter dynamicFilter)
     {
-        KuduTableLayoutHandle layoutHandle = (KuduTableLayoutHandle) layout;
+        KuduTableHandle handle = (KuduTableHandle) table;
 
-        List<KuduSplit> splits = clientSession.buildKuduSplits(layoutHandle);
+        List<KuduSplit> splits = clientSession.buildKuduSplits(handle);
 
-        return new FixedSplitSource(splits);
+        switch (splitSchedulingStrategy) {
+            case UNGROUPED_SCHEDULING:
+                return new FixedSplitSource(splits);
+            case GROUPED_SCHEDULING:
+                return new KuduBucketedSplitSource(splits);
+            default:
+                throw new IllegalArgumentException("Unknown splitSchedulingStrategy: " + splitSchedulingStrategy);
+        }
     }
 }

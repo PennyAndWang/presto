@@ -24,7 +24,6 @@ import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import io.prestosql.block.BlockEncodingManager;
 import io.prestosql.connector.CatalogName;
 import io.prestosql.execution.buffer.BufferResult;
 import io.prestosql.execution.buffer.BufferState;
@@ -46,6 +45,7 @@ import io.prestosql.operator.OperatorFactory;
 import io.prestosql.operator.PipelineExecutionStrategy;
 import io.prestosql.operator.SourceOperator;
 import io.prestosql.operator.SourceOperatorFactory;
+import io.prestosql.operator.StageExecutionDescriptor;
 import io.prestosql.operator.TaskContext;
 import io.prestosql.operator.TaskOutputOperator.TaskOutputOperatorFactory;
 import io.prestosql.operator.ValuesOperator.ValuesOperatorFactory;
@@ -55,7 +55,6 @@ import io.prestosql.spi.QueryId;
 import io.prestosql.spi.connector.ConnectorSplit;
 import io.prestosql.spi.connector.UpdatablePageSource;
 import io.prestosql.spi.memory.MemoryPoolId;
-import io.prestosql.spi.type.TestingTypeManager;
 import io.prestosql.spi.type.Type;
 import io.prestosql.spiller.SpillSpaceTracker;
 import io.prestosql.sql.planner.LocalExecutionPlanner.LocalExecutionPlan;
@@ -89,6 +88,9 @@ import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.block.BlockAssertions.createStringSequenceBlock;
 import static io.prestosql.block.BlockAssertions.createStringsBlock;
+import static io.prestosql.execution.TaskState.FINISHED;
+import static io.prestosql.execution.TaskState.FLUSHING;
+import static io.prestosql.execution.TaskState.RUNNING;
 import static io.prestosql.execution.TaskTestUtils.TABLE_SCAN_NODE_ID;
 import static io.prestosql.execution.TaskTestUtils.createTestSplitMonitor;
 import static io.prestosql.execution.buffer.BufferState.OPEN;
@@ -96,10 +98,9 @@ import static io.prestosql.execution.buffer.BufferState.TERMINAL_BUFFER_STATES;
 import static io.prestosql.execution.buffer.OutputBuffers.BufferType.PARTITIONED;
 import static io.prestosql.execution.buffer.OutputBuffers.createInitialEmptyOutputBuffers;
 import static io.prestosql.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.operator.PipelineExecutionStrategy.GROUPED_EXECUTION;
 import static io.prestosql.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
-import static io.prestosql.operator.StageExecutionDescriptor.groupedExecution;
-import static io.prestosql.operator.StageExecutionDescriptor.ungroupedExecution;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
@@ -114,6 +115,7 @@ public class TestSqlTaskExecution
     private static final OutputBufferId OUTPUT_BUFFER_ID = new OutputBufferId(0);
     private static final CatalogName CONNECTOR_ID = new CatalogName("test");
     private static final Duration ASSERT_WAIT_TIMEOUT = new Duration(1, HOURS);
+    public static final TaskId TASK_ID = new TaskId("query", 0, 0);
 
     @DataProvider
     public static Object[][] executionStrategies()
@@ -131,7 +133,7 @@ public class TestSqlTaskExecution
         taskExecutor.start();
 
         try {
-            TaskStateMachine taskStateMachine = new TaskStateMachine(TaskId.valueOf("task-id"), taskNotificationExecutor);
+            TaskStateMachine taskStateMachine = new TaskStateMachine(TASK_ID, taskNotificationExecutor);
             PartitionedOutputBuffer outputBuffer = newTestingOutputBuffer(taskNotificationExecutor);
             OutputBufferConsumer outputBufferConsumer = new OutputBufferConsumer(outputBuffer, OUTPUT_BUFFER_ID);
 
@@ -154,7 +156,7 @@ public class TestSqlTaskExecution
                     TABLE_SCAN_NODE_ID,
                     outputBuffer,
                     Function.identity(),
-                    new PagesSerdeFactory(new BlockEncodingManager(new TestingTypeManager()), false));
+                    new PagesSerdeFactory(createTestMetadataManager().getBlockEncodingSerde(), false));
             LocalExecutionPlan localExecutionPlan = new LocalExecutionPlan(
                     ImmutableList.of(new DriverFactory(
                             0,
@@ -164,7 +166,7 @@ public class TestSqlTaskExecution
                             OptionalInt.empty(),
                             executionStrategy)),
                     ImmutableList.of(TABLE_SCAN_NODE_ID),
-                    executionStrategy == GROUPED_EXECUTION ? groupedExecution(ImmutableList.of(TABLE_SCAN_NODE_ID)) : ungroupedExecution());
+                    executionStrategy == GROUPED_EXECUTION ? StageExecutionDescriptor.fixedLifespanScheduleGroupedExecution(ImmutableList.of(TABLE_SCAN_NODE_ID)) : StageExecutionDescriptor.ungroupedExecution());
             TaskContext taskContext = newTestingTaskContext(taskNotificationExecutor, driverYieldExecutor, taskStateMachine);
             SqlTaskExecution sqlTaskExecution = SqlTaskExecution.createSqlTaskExecution(
                     taskStateMachine,
@@ -178,7 +180,7 @@ public class TestSqlTaskExecution
 
             //
             // test body
-            assertEquals(taskStateMachine.getState(), TaskState.RUNNING);
+            assertEquals(taskStateMachine.getState(), RUNNING);
 
             switch (executionStrategy) {
                 case UNGROUPED_EXECUTION:
@@ -278,9 +280,9 @@ public class TestSqlTaskExecution
                     throw new UnsupportedOperationException();
             }
 
+            assertEquals(taskStateMachine.getStateChange(RUNNING).get(10, SECONDS), FLUSHING);
             outputBufferConsumer.abort(); // complete the task by calling abort on it
-            TaskState taskState = taskStateMachine.getStateChange(TaskState.RUNNING).get(10, SECONDS);
-            assertEquals(taskState, TaskState.FINISHED);
+            assertEquals(taskStateMachine.getStateChange(FLUSHING).get(10, SECONDS), FINISHED);
         }
         finally {
             taskExecutor.stop();
@@ -299,7 +301,7 @@ public class TestSqlTaskExecution
         taskExecutor.start();
 
         try {
-            TaskStateMachine taskStateMachine = new TaskStateMachine(TaskId.valueOf("task-id"), taskNotificationExecutor);
+            TaskStateMachine taskStateMachine = new TaskStateMachine(TASK_ID, taskNotificationExecutor);
             PartitionedOutputBuffer outputBuffer = newTestingOutputBuffer(taskNotificationExecutor);
             OutputBufferConsumer outputBufferConsumer = new OutputBufferConsumer(outputBuffer, OUTPUT_BUFFER_ID);
 
@@ -376,7 +378,7 @@ public class TestSqlTaskExecution
                     joinCNodeId,
                     outputBuffer,
                     Function.identity(),
-                    new PagesSerdeFactory(new BlockEncodingManager(new TestingTypeManager()), false));
+                    new PagesSerdeFactory(createTestMetadataManager().getBlockEncodingSerde(), false));
             TestingCrossJoinOperatorFactory joinOperatorFactoryA = new TestingCrossJoinOperatorFactory(2, joinANodeId, buildStatesA);
             TestingCrossJoinOperatorFactory joinOperatorFactoryB = new TestingCrossJoinOperatorFactory(102, joinBNodeId, buildStatesB);
             TestingCrossJoinOperatorFactory joinOperatorFactoryC = new TestingCrossJoinOperatorFactory(3, joinCNodeId, buildStatesC);
@@ -415,7 +417,7 @@ public class TestSqlTaskExecution
                                     OptionalInt.empty(),
                                     UNGROUPED_EXECUTION)),
                     ImmutableList.of(scan2NodeId, scan0NodeId),
-                    executionStrategy == GROUPED_EXECUTION ? groupedExecution(ImmutableList.of(scan0NodeId, scan2NodeId)) : ungroupedExecution());
+                    executionStrategy == GROUPED_EXECUTION ? StageExecutionDescriptor.fixedLifespanScheduleGroupedExecution(ImmutableList.of(scan0NodeId, scan2NodeId)) : StageExecutionDescriptor.ungroupedExecution());
             TaskContext taskContext = newTestingTaskContext(taskNotificationExecutor, driverYieldExecutor, taskStateMachine);
             SqlTaskExecution sqlTaskExecution = SqlTaskExecution.createSqlTaskExecution(
                     taskStateMachine,
@@ -429,7 +431,7 @@ public class TestSqlTaskExecution
 
             //
             // test body
-            assertEquals(taskStateMachine.getState(), TaskState.RUNNING);
+            assertEquals(taskStateMachine.getState(), RUNNING);
 
             switch (executionStrategy) {
                 case UNGROUPED_EXECUTION:
@@ -580,9 +582,9 @@ public class TestSqlTaskExecution
                     throw new UnsupportedOperationException();
             }
 
+            assertEquals(taskStateMachine.getStateChange(RUNNING).get(10, SECONDS), FLUSHING);
             outputBufferConsumer.abort(); // complete the task by calling abort on it
-            TaskState taskState = taskStateMachine.getStateChange(TaskState.RUNNING).get(10, SECONDS);
-            assertEquals(taskState, TaskState.FINISHED);
+            assertEquals(taskStateMachine.getStateChange(FLUSHING).get(10, SECONDS), FINISHED);
         }
         finally {
             taskExecutor.stop();
@@ -595,26 +597,26 @@ public class TestSqlTaskExecution
     {
         QueryContext queryContext = new QueryContext(
                 new QueryId("queryid"),
-                new DataSize(1, MEGABYTE),
-                new DataSize(2, MEGABYTE),
-                new MemoryPool(new MemoryPoolId("test"), new DataSize(1, GIGABYTE)),
+                DataSize.of(1, MEGABYTE),
+                DataSize.of(2, MEGABYTE),
+                new MemoryPool(new MemoryPoolId("test"), DataSize.of(1, GIGABYTE)),
                 new TestingGcMonitor(),
                 taskNotificationExecutor,
                 driverYieldExecutor,
-                new DataSize(1, MEGABYTE),
-                new SpillSpaceTracker(new DataSize(1, GIGABYTE)));
-        return queryContext.addTaskContext(taskStateMachine, TEST_SESSION, false, false, OptionalInt.empty());
+                DataSize.of(1, MEGABYTE),
+                new SpillSpaceTracker(DataSize.of(1, GIGABYTE)));
+        return queryContext.addTaskContext(taskStateMachine, TEST_SESSION, () -> {}, false, false, OptionalInt.empty());
     }
 
     private PartitionedOutputBuffer newTestingOutputBuffer(ScheduledExecutorService taskNotificationExecutor)
     {
         return new PartitionedOutputBuffer(
-                "task-id",
+                TASK_ID.toString(),
                 new StateMachine<>("bufferState", taskNotificationExecutor, OPEN, TERMINAL_BUFFER_STATES),
                 createInitialEmptyOutputBuffers(PARTITIONED)
                         .withBuffer(OUTPUT_BUFFER_ID, 0)
                         .withNoMoreBufferIds(),
-                new DataSize(1, MEGABYTE),
+                DataSize.of(1, MEGABYTE),
                 () -> new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 taskNotificationExecutor);
     }
@@ -657,7 +659,7 @@ public class TestSqlTaskExecution
             surplusPositions -= positions;
             while (surplusPositions < 0) {
                 assertFalse(bufferComplete, "bufferComplete is set before enough positions are consumed");
-                BufferResult results = outputBuffer.get(outputBufferId, sequenceId, new DataSize(1, MEGABYTE)).get(nanoUntil - System.nanoTime(), TimeUnit.NANOSECONDS);
+                BufferResult results = outputBuffer.get(outputBufferId, sequenceId, DataSize.of(1, MEGABYTE)).get(nanoUntil - System.nanoTime(), TimeUnit.NANOSECONDS);
                 bufferComplete = results.isBufferComplete();
                 for (SerializedPage serializedPage : results.getSerializedPages()) {
                     surplusPositions += serializedPage.getPositionCount();
@@ -672,7 +674,7 @@ public class TestSqlTaskExecution
             assertEquals(surplusPositions, 0);
             long nanoUntil = System.nanoTime() + timeout.toMillis() * 1_000_000;
             while (!bufferComplete) {
-                BufferResult results = outputBuffer.get(outputBufferId, sequenceId, new DataSize(1, MEGABYTE)).get(nanoUntil - System.nanoTime(), TimeUnit.NANOSECONDS);
+                BufferResult results = outputBuffer.get(outputBufferId, sequenceId, DataSize.of(1, MEGABYTE)).get(nanoUntil - System.nanoTime(), TimeUnit.NANOSECONDS);
                 bufferComplete = results.isBufferComplete();
                 for (SerializedPage serializedPage : results.getSerializedPages()) {
                     assertEquals(serializedPage.getPositionCount(), 0);
@@ -760,7 +762,7 @@ public class TestSqlTaskExecution
             checkState(!overallNoMoreOperators, "noMoreOperators() has been called");
             checkState(!driverGroupsWithNoMoreOperators.contains(driverContext.getLifespan()), "noMoreOperators(lifespan) has been called");
             OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, sourceId, TestingScanOperator.class.getSimpleName());
-            return new TestingScanOperator(operatorContext, sourceId, driverContext.getLifespan());
+            return new TestingScanOperator(operatorContext, sourceId);
         }
 
         @Override
@@ -796,7 +798,6 @@ public class TestSqlTaskExecution
         {
             private final OperatorContext operatorContext;
             private final PlanNodeId planNodeId;
-            private final Lifespan lifespan;
 
             private final SettableFuture<?> blocked = SettableFuture.create();
 
@@ -806,12 +807,10 @@ public class TestSqlTaskExecution
 
             public TestingScanOperator(
                     OperatorContext operatorContext,
-                    PlanNodeId planNodeId,
-                    Lifespan lifespan)
+                    PlanNodeId planNodeId)
             {
                 this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
                 this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
-                this.lifespan = requireNonNull(lifespan, "lifespan is null");
             }
 
             @Override
@@ -883,7 +882,7 @@ public class TestSqlTaskExecution
             @Override
             public void addInput(Page page)
             {
-                throw new UnsupportedOperationException(getClass().getName() + " can not take input");
+                throw new UnsupportedOperationException(getClass().getName() + " cannot take input");
             }
 
             @Override

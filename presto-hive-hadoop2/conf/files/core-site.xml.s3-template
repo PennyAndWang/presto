@@ -17,6 +17,17 @@
 -->
 <configuration>
 
+    <!-- Hive impersonation -->
+    <property>
+        <name>hadoop.proxyuser.hive.hosts</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.hive.groups</name>
+        <value>*</value>
+    </property>
+
     <property>
         <name>fs.defaultFS</name>
         <value>hdfs://hadoop-master:9000</value>
@@ -24,22 +35,22 @@
 
     <property>
         <name>fs.s3.awsAccessKeyId</name>
-        <value>%AWS_ACCESS_KEY%</value>
+        <value>%AWS_ACCESS_KEY_ID%</value>
     </property>
 
     <property>
         <name>fs.s3.awsSecretAccessKey</name>
-        <value>%AWS_SECRET_KEY%</value>
+        <value>%AWS_SECRET_ACCESS_KEY%</value>
     </property>
 
     <property>
         <name>fs.s3a.access.key</name>
-        <value>%AWS_ACCESS_KEY%</value>
+        <value>%AWS_ACCESS_KEY_ID%</value>
     </property>
 
     <property>
         <name>fs.s3a.secret.key</name>
-        <value>%AWS_SECRET_KEY%</value>
+        <value>%AWS_SECRET_ACCESS_KEY%</value>
     </property>
 
     <property>

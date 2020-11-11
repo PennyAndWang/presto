@@ -16,24 +16,24 @@ package io.prestosql.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.ObjectMapperProvider;
-import io.prestosql.block.BlockEncodingManager;
 import io.prestosql.connector.CatalogName;
 import io.prestosql.cost.StatsAndCosts;
 import io.prestosql.event.SplitMonitor;
+import io.prestosql.eventlistener.EventListenerConfig;
 import io.prestosql.eventlistener.EventListenerManager;
 import io.prestosql.execution.TestSqlTaskManager.MockExchangeClientSupplier;
 import io.prestosql.execution.buffer.OutputBuffers;
-import io.prestosql.execution.scheduler.LegacyNetworkTopology;
 import io.prestosql.execution.scheduler.NodeScheduler;
 import io.prestosql.execution.scheduler.NodeSchedulerConfig;
+import io.prestosql.execution.scheduler.UniformNodeSelectorFactory;
 import io.prestosql.index.IndexManager;
 import io.prestosql.metadata.InMemoryNodeManager;
-import io.prestosql.metadata.MetadataManager;
+import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.Split;
 import io.prestosql.operator.LookupJoinOperators;
 import io.prestosql.operator.PagesIndex;
 import io.prestosql.operator.index.IndexJoinLookupStats;
-import io.prestosql.spi.type.TestingTypeManager;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.spiller.GenericSpillerFactory;
 import io.prestosql.split.PageSinkManager;
 import io.prestosql.split.PageSourceManager;
@@ -55,6 +55,7 @@ import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.sql.planner.plan.TableScanNode;
 import io.prestosql.testing.TestingMetadata.TestingColumnHandle;
 import io.prestosql.testing.TestingSplit;
+import io.prestosql.type.BlockTypeOperators;
 import io.prestosql.util.FinalizerService;
 
 import java.util.List;
@@ -62,6 +63,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.operator.StageExecutionDescriptor.ungroupedExecution;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
@@ -71,9 +73,7 @@ import static io.prestosql.testing.TestingHandles.TEST_TABLE_HANDLE;
 
 public final class TaskTestUtils
 {
-    private TaskTestUtils()
-    {
-    }
+    private TaskTestUtils() {}
 
     public static final PlanNodeId TABLE_SCAN_NODE_ID = new PlanNodeId("tableScan");
 
@@ -91,7 +91,8 @@ public final class TaskTestUtils
                     TABLE_SCAN_NODE_ID,
                     TEST_TABLE_HANDLE,
                     ImmutableList.of(SYMBOL),
-                    ImmutableMap.of(SYMBOL, new TestingColumnHandle("column", 0, BIGINT))),
+                    ImmutableMap.of(SYMBOL, new TestingColumnHandle("column", 0, BIGINT)),
+                    false),
             ImmutableMap.of(SYMBOL, VARCHAR),
             SOURCE_DISTRIBUTION,
             ImmutableList.of(TABLE_SCAN_NODE_ID),
@@ -103,7 +104,7 @@ public final class TaskTestUtils
 
     public static LocalExecutionPlanner createTestingPlanner()
     {
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
+        Metadata metadata = createTestMetadataManager();
 
         PageSourceManager pageSourceManager = new PageSourceManager();
         pageSourceManager.addConnectorPageSourceProvider(CONNECTOR_ID, new TestingPageSourceProvider());
@@ -111,12 +112,13 @@ public final class TaskTestUtils
         // we don't start the finalizer so nothing will be collected, which is ok for a test
         FinalizerService finalizerService = new FinalizerService();
 
-        NodeScheduler nodeScheduler = new NodeScheduler(
-                new LegacyNetworkTopology(),
+        TypeOperators typeOperators = new TypeOperators();
+        BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
+        NodeScheduler nodeScheduler = new NodeScheduler(new UniformNodeSelectorFactory(
                 new InMemoryNodeManager(),
                 new NodeSchedulerConfig().setIncludeCoordinator(true),
-                new NodeTaskMap(finalizerService));
-        NodePartitioningManager nodePartitioningManager = new NodePartitioningManager(nodeScheduler);
+                new NodeTaskMap(finalizerService)));
+        NodePartitioningManager nodePartitioningManager = new NodePartitioningManager(nodeScheduler, blockTypeOperators);
 
         PageFunctionCompiler pageFunctionCompiler = new PageFunctionCompiler(metadata, 0);
         return new LocalExecutionPlanner(
@@ -142,11 +144,13 @@ public final class TaskTestUtils
                 (types, partitionFunction, spillContext, memoryContext) -> {
                     throw new UnsupportedOperationException();
                 },
-                new BlockEncodingManager(new TestingTypeManager()),
                 new PagesIndex.TestingFactory(false),
-                new JoinCompiler(MetadataManager.createTestMetadataManager()),
+                new JoinCompiler(typeOperators),
                 new LookupJoinOperators(),
-                new OrderingCompiler());
+                new OrderingCompiler(typeOperators),
+                new DynamicFilterConfig(),
+                typeOperators,
+                blockTypeOperators);
     }
 
     public static TaskInfo updateTask(SqlTask sqlTask, List<TaskSource> taskSources, OutputBuffers outputBuffers)
@@ -157,7 +161,7 @@ public final class TaskTestUtils
     public static SplitMonitor createTestSplitMonitor()
     {
         return new SplitMonitor(
-                new EventListenerManager(),
+                new EventListenerManager(new EventListenerConfig()),
                 new ObjectMapperProvider().get());
     }
 }

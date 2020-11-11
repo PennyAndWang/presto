@@ -19,9 +19,13 @@ import io.prestosql.client.QueryData;
 import io.prestosql.client.QueryStatusInfo;
 import io.prestosql.server.testing.TestingPrestoServer;
 import io.prestosql.spi.type.Type;
-import io.prestosql.tests.AbstractTestingPrestoClient;
-import io.prestosql.tests.ResultsSession;
-import org.elasticsearch.client.Client;
+import io.prestosql.spi.type.VarcharType;
+import io.prestosql.testing.AbstractTestingPrestoClient;
+import io.prestosql.testing.ResultsSession;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.support.WriteRequest;
+import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import java.io.IOException;
@@ -37,20 +41,17 @@ import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DateType.DATE;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
-import static io.prestosql.spi.type.Varchars.isVarcharType;
 import static java.util.Objects.requireNonNull;
-import static org.elasticsearch.client.Requests.flushRequest;
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
-import static org.elasticsearch.common.xcontent.XContentType.JSON;
 
 public class ElasticsearchLoader
         extends AbstractTestingPrestoClient<Void>
 {
     private final String tableName;
-    private final Client client;
+    private final RestHighLevelClient client;
 
     public ElasticsearchLoader(
-            Client client,
+            RestHighLevelClient client,
             String tableName,
             TestingPrestoServer prestoServer,
             Session defaultSession)
@@ -87,6 +88,8 @@ public class ElasticsearchLoader
             }
             checkState(types.get() != null, "Type information is missing");
             List<Column> columns = statusInfo.getColumns();
+
+            BulkRequest request = new BulkRequest();
             for (List<Object> fields : data.getData()) {
                 try {
                     XContentBuilder dataBuilder = jsonBuilder().startObject();
@@ -96,15 +99,21 @@ public class ElasticsearchLoader
                         dataBuilder.field(columns.get(i).getName(), value);
                     }
                     dataBuilder.endObject();
-                    client.prepareIndex(tableName, "doc")
-                            .setSource(dataBuilder.string(), JSON)
-                            .get();
+
+                    request.add(new IndexRequest(tableName, "doc").source(dataBuilder));
                 }
                 catch (IOException e) {
                     throw new UncheckedIOException("Error loading data into Elasticsearch index: " + tableName, e);
                 }
             }
-            client.admin().indices().flush(flushRequest(tableName)).actionGet();
+
+            request.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
+            try {
+                client.bulk(request);
+            }
+            catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -119,7 +128,7 @@ public class ElasticsearchLoader
                 return null;
             }
 
-            if (type == BOOLEAN || type == DATE || isVarcharType(type)) {
+            if (type == BOOLEAN || type == DATE || type instanceof VarcharType) {
                 return value;
             }
             if (type == BIGINT) {

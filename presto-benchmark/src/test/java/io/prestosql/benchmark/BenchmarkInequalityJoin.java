@@ -13,8 +13,6 @@
  */
 package io.prestosql.benchmark;
 
-import com.google.common.collect.ImmutableMap;
-import io.prestosql.SystemSessionProperties;
 import io.prestosql.spi.Page;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -59,9 +57,6 @@ public class BenchmarkInequalityJoin
     {
         private MemoryLocalQueryRunner queryRunner;
 
-        @Param({"true", "false"})
-        private String fastInequalityJoins;
-
         // number of buckets. The smaller number of buckets, the longer position links chain
         @Param({"100", "1000", "10000", "60000"})
         private int buckets;
@@ -79,7 +74,7 @@ public class BenchmarkInequalityJoin
         @Setup
         public void setUp()
         {
-            queryRunner = new MemoryLocalQueryRunner(ImmutableMap.of(SystemSessionProperties.FAST_INEQUALITY_JOINS, fastInequalityJoins));
+            queryRunner = new MemoryLocalQueryRunner();
 
             // t1.val1 is in range [0, 1000)
             // t1.bucket is in [0, 1000)
@@ -134,6 +129,13 @@ public class BenchmarkInequalityJoin
     {
         return context.getQueryRunner()
                 .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t1.val1 + 1 < t2.val2 AND t2.val2 < t1.val1 + 5 ");
+    }
+
+    @Benchmark
+    public List<Page> benchmarkBetweenPredicateJoin(Context context)
+    {
+        return context.getQueryRunner()
+                .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t2.val2 BETWEEN t1.val1 + 1 AND t1.val1 + 5");
     }
 
     public static void main(String[] args)

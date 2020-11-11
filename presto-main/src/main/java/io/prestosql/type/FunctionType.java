@@ -52,9 +52,9 @@ public class FunctionType
         ImmutableList.Builder<TypeSignatureParameter> builder = ImmutableList.builder();
         argumentTypes.stream()
                 .map(Type::getTypeSignature)
-                .map(TypeSignatureParameter::of)
+                .map(TypeSignatureParameter::typeParameter)
                 .forEach(builder::add);
-        builder.add(TypeSignatureParameter.of(returnType.getTypeSignature()));
+        builder.add(TypeSignatureParameter.typeParameter(returnType.getTypeSignature()));
         return builder.build();
     }
 
@@ -86,7 +86,7 @@ public class FunctionType
         ImmutableList<String> names = getTypeParameters().stream()
                 .map(Type::getDisplayName)
                 .collect(toImmutableList());
-        return "function<" + Joiner.on(",").join(names) + ">";
+        return "function(" + Joiner.on(",").join(names) + ")";
     }
 
     @Override
@@ -105,24 +105,6 @@ public class FunctionType
     public boolean isOrderable()
     {
         return false;
-    }
-
-    @Override
-    public long hash(Block block, int position)
-    {
-        throw new UnsupportedOperationException(getTypeSignature() + " type is not comparable");
-    }
-
-    @Override
-    public boolean equalTo(Block leftBlock, int leftPosition, Block rightBlock, int rightPosition)
-    {
-        throw new UnsupportedOperationException(getTypeSignature() + " type is not comparable");
-    }
-
-    @Override
-    public int compareTo(Block leftBlock, int leftPosition, Block rightBlock, int rightPosition)
-    {
-        throw new UnsupportedOperationException(getTypeSignature() + " type is not orderable");
     }
 
     @Override

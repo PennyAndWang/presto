@@ -15,7 +15,12 @@ package io.prestosql.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
+import io.airlift.units.Duration;
 import io.prestosql.orc.OrcWriteValidation.OrcWriteValidationMode;
+import io.prestosql.plugin.hive.orc.OrcReaderConfig;
+import io.prestosql.plugin.hive.orc.OrcWriterConfig;
+import io.prestosql.plugin.hive.parquet.ParquetReaderConfig;
+import io.prestosql.plugin.hive.parquet.ParquetWriterConfig;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.session.PropertyMetadata;
@@ -26,15 +31,15 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.prestosql.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.APPEND;
-import static io.prestosql.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.ERROR;
+import static io.prestosql.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
+import static io.prestosql.plugin.base.session.PropertyMetadataUtil.durationProperty;
 import static io.prestosql.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.prestosql.spi.session.PropertyMetadata.booleanProperty;
+import static io.prestosql.spi.session.PropertyMetadata.enumProperty;
 import static io.prestosql.spi.session.PropertyMetadata.integerProperty;
 import static io.prestosql.spi.session.PropertyMetadata.stringProperty;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
-import static io.prestosql.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 
@@ -50,6 +55,7 @@ public final class HiveSessionProperties
     private static final String ORC_TINY_STRIPE_THRESHOLD = "orc_tiny_stripe_threshold";
     private static final String ORC_MAX_READ_BLOCK_SIZE = "orc_max_read_block_size";
     private static final String ORC_LAZY_READ_SMALL_RANGES = "orc_lazy_read_small_ranges";
+    private static final String ORC_NESTED_LAZY_ENABLED = "orc_nested_lazy_enabled";
     private static final String ORC_STRING_STATISTICS_LIMIT = "orc_string_statistics_limit";
     private static final String ORC_OPTIMIZED_WRITER_VALIDATE = "orc_optimized_writer_validate";
     private static final String ORC_OPTIMIZED_WRITER_VALIDATE_PERCENTAGE = "orc_optimized_writer_validate_percentage";
@@ -58,10 +64,14 @@ public final class HiveSessionProperties
     private static final String ORC_OPTIMIZED_WRITER_MAX_STRIPE_SIZE = "orc_optimized_writer_max_stripe_size";
     private static final String ORC_OPTIMIZED_WRITER_MAX_STRIPE_ROWS = "orc_optimized_writer_max_stripe_rows";
     private static final String ORC_OPTIMIZED_WRITER_MAX_DICTIONARY_MEMORY = "orc_optimized_writer_max_dictionary_memory";
+    private static final String ORC_USE_COLUMN_NAME = "orc_use_column_names";
     private static final String HIVE_STORAGE_FORMAT = "hive_storage_format";
+    private static final String COMPRESSION_CODEC = "compression_codec";
+    private static final String PARTITION_USE_COLUMN_NAMES = "partition_use_column_names";
     private static final String RESPECT_TABLE_FORMAT = "respect_table_format";
+    private static final String CREATE_EMPTY_BUCKET_FILES = "create_empty_bucket_files";
     private static final String PARQUET_USE_COLUMN_NAME = "parquet_use_column_names";
-    private static final String PARQUET_FAIL_WITH_CORRUPTED_STATISTICS = "parquet_fail_with_corrupted_statistics";
+    private static final String PARQUET_IGNORE_STATISTICS = "parquet_ignore_statistics";
     private static final String PARQUET_MAX_READ_BLOCK_SIZE = "parquet_max_read_block_size";
     private static final String PARQUET_WRITER_BLOCK_SIZE = "parquet_writer_block_size";
     private static final String PARQUET_WRITER_PAGE_SIZE = "parquet_writer_page_size";
@@ -77,6 +87,12 @@ public final class HiveSessionProperties
     private static final String S3_SELECT_PUSHDOWN_ENABLED = "s3_select_pushdown_enabled";
     private static final String TEMPORARY_STAGING_DIRECTORY_ENABLED = "temporary_staging_directory_enabled";
     private static final String TEMPORARY_STAGING_DIRECTORY_PATH = "temporary_staging_directory_path";
+    private static final String IGNORE_ABSENT_PARTITIONS = "ignore_absent_partitions";
+    private static final String QUERY_PARTITION_FILTER_REQUIRED = "query_partition_filter_required";
+    private static final String PROJECTION_PUSHDOWN_ENABLED = "projection_pushdown_enabled";
+    private static final String TIMESTAMP_PRECISION = "timestamp_precision";
+    private static final String PARQUET_OPTIMIZED_WRITER_ENABLED = "experimental_parquet_optimized_writer_enabled";
+    private static final String DYNAMIC_FILTERING_PROBE_BLOCKING_TIMEOUT = "dynamic_filtering_probe_blocking_timeout";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -87,19 +103,26 @@ public final class HiveSessionProperties
         OVERWRITE,
         /**/;
 
-        public static InsertExistingPartitionsBehavior valueOf(String value, boolean immutablePartition)
+        public static InsertExistingPartitionsBehavior valueOf(String value, boolean immutablePartitions)
         {
             InsertExistingPartitionsBehavior enumValue = valueOf(value.toUpperCase(ENGLISH));
-            if (immutablePartition) {
-                checkArgument(enumValue != APPEND, "Presto is configured to treat Hive partitions as immutable. %s is not allowed to be set to %s", INSERT_EXISTING_PARTITIONS_BEHAVIOR, APPEND);
-            }
-
+            checkArgument(isValid(enumValue, immutablePartitions), "Presto is configured to treat Hive partitions as immutable. %s is not allowed to be set to %s", INSERT_EXISTING_PARTITIONS_BEHAVIOR, APPEND);
             return enumValue;
+        }
+
+        static boolean isValid(InsertExistingPartitionsBehavior value, boolean immutable)
+        {
+            return !(immutable && value == APPEND);
         }
     }
 
     @Inject
-    public HiveSessionProperties(HiveConfig hiveConfig, OrcFileWriterConfig orcFileWriterConfig, ParquetFileWriterConfig parquetFileWriterConfig)
+    public HiveSessionProperties(
+            HiveConfig hiveConfig,
+            OrcReaderConfig orcReaderConfig,
+            OrcWriterConfig orcWriterConfig,
+            ParquetReaderConfig parquetReaderConfig,
+            ParquetWriterConfig parquetWriterConfig)
     {
         sessionProperties = ImmutableList.of(
                 booleanProperty(
@@ -117,64 +140,69 @@ public final class HiveSessionProperties
                         "Behavior on insert existing partitions; this session property doesn't control behavior on insert existing unpartitioned table",
                         VARCHAR,
                         InsertExistingPartitionsBehavior.class,
-                        hiveConfig.isImmutablePartitions() ? ERROR : APPEND,
+                        hiveConfig.getInsertExistingPartitionsBehavior(),
                         false,
                         value -> InsertExistingPartitionsBehavior.valueOf((String) value, hiveConfig.isImmutablePartitions()),
                         InsertExistingPartitionsBehavior::toString),
                 booleanProperty(
                         ORC_BLOOM_FILTERS_ENABLED,
                         "ORC: Enable bloom filters for predicate pushdown",
-                        hiveConfig.isOrcBloomFiltersEnabled(),
+                        orcReaderConfig.isBloomFiltersEnabled(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_MAX_MERGE_DISTANCE,
                         "ORC: Maximum size of gap between two reads to merge into a single read",
-                        hiveConfig.getOrcMaxMergeDistance(),
+                        orcReaderConfig.getMaxMergeDistance(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_MAX_BUFFER_SIZE,
                         "ORC: Maximum size of a single read",
-                        hiveConfig.getOrcMaxBufferSize(),
+                        orcReaderConfig.getMaxBufferSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_STREAM_BUFFER_SIZE,
                         "ORC: Size of buffer for streaming reads",
-                        hiveConfig.getOrcStreamBufferSize(),
+                        orcReaderConfig.getStreamBufferSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_TINY_STRIPE_THRESHOLD,
                         "ORC: Threshold below which an ORC stripe or file will read in its entirety",
-                        hiveConfig.getOrcTinyStripeThreshold(),
+                        orcReaderConfig.getTinyStripeThreshold(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_MAX_READ_BLOCK_SIZE,
                         "ORC: Soft max size of Presto blocks produced by ORC reader",
-                        hiveConfig.getOrcMaxReadBlockSize(),
+                        orcReaderConfig.getMaxBlockSize(),
                         false),
                 booleanProperty(
                         ORC_LAZY_READ_SMALL_RANGES,
                         "Experimental: ORC: Read small file segments lazily",
-                        hiveConfig.isOrcLazyReadSmallRanges(),
+                        orcReaderConfig.isLazyReadSmallRanges(),
                         false),
-                dataSizeSessionProperty(
+                booleanProperty(
+                        ORC_NESTED_LAZY_ENABLED,
+                        "Experimental: ORC: Lazily read nested data",
+                        orcReaderConfig.isNestedLazy(),
+                        false),
+                dataSizeProperty(
                         ORC_STRING_STATISTICS_LIMIT,
                         "ORC: Maximum size of string statistics; drop if exceeding",
-                        orcFileWriterConfig.getStringStatisticsLimit(),
+                        orcWriterConfig.getStringStatisticsLimit(),
                         false),
                 booleanProperty(
                         ORC_OPTIMIZED_WRITER_VALIDATE,
-                        "Experimental: ORC: Force all validation for files",
-                        hiveConfig.getOrcWriterValidationPercentage() > 0.0,
+                        "ORC: Force all validation for files",
+                        orcWriterConfig.getValidationPercentage() > 0.0,
                         false),
                 new PropertyMetadata<>(
                         ORC_OPTIMIZED_WRITER_VALIDATE_PERCENTAGE,
-                        "Experimental: ORC: sample percentage for validation for files",
+                        "ORC: sample percentage for validation for files",
                         DOUBLE,
                         Double.class,
-                        hiveConfig.getOrcWriterValidationPercentage(),
+                        orcWriterConfig.getValidationPercentage(),
                         false,
                         value -> {
-                            double doubleValue = ((Number) value).doubleValue();
+                            double doubleValue = (double) value;
                             if (doubleValue < 0.0 || doubleValue > 100.0) {
                                 throw new PrestoException(
                                         INVALID_SESSION_PROPERTY,
@@ -183,35 +211,53 @@ public final class HiveSessionProperties
                             return doubleValue;
                         },
                         value -> value),
-                stringProperty(
+                enumProperty(
                         ORC_OPTIMIZED_WRITER_VALIDATE_MODE,
-                        "Experimental: ORC: Level of detail in ORC validation",
-                        hiveConfig.getOrcWriterValidationMode().toString(),
+                        "ORC: Level of detail in ORC validation",
+                        OrcWriteValidationMode.class,
+                        orcWriterConfig.getValidationMode(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_OPTIMIZED_WRITER_MIN_STRIPE_SIZE,
-                        "Experimental: ORC: Min stripe size",
-                        orcFileWriterConfig.getStripeMinSize(),
+                        "ORC: Min stripe size",
+                        orcWriterConfig.getStripeMinSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_OPTIMIZED_WRITER_MAX_STRIPE_SIZE,
-                        "Experimental: ORC: Max stripe size",
-                        orcFileWriterConfig.getStripeMaxSize(),
+                        "ORC: Max stripe size",
+                        orcWriterConfig.getStripeMaxSize(),
                         false),
                 integerProperty(
                         ORC_OPTIMIZED_WRITER_MAX_STRIPE_ROWS,
-                        "Experimental: ORC: Max stripe row count",
-                        orcFileWriterConfig.getStripeMaxRowCount(),
+                        "ORC: Max stripe row count",
+                        orcWriterConfig.getStripeMaxRowCount(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         ORC_OPTIMIZED_WRITER_MAX_DICTIONARY_MEMORY,
-                        "Experimental: ORC: Max dictionary memory",
-                        orcFileWriterConfig.getDictionaryMaxMemory(),
+                        "ORC: Max dictionary memory",
+                        orcWriterConfig.getDictionaryMaxMemory(),
                         false),
-                stringProperty(
+                booleanProperty(
+                        ORC_USE_COLUMN_NAME,
+                        "Orc: Access ORC columns using names from the file",
+                        orcReaderConfig.isUseColumnNames(),
+                        false),
+                enumProperty(
                         HIVE_STORAGE_FORMAT,
                         "Default storage format for new tables or partitions",
-                        hiveConfig.getHiveStorageFormat().toString(),
+                        HiveStorageFormat.class,
+                        hiveConfig.getHiveStorageFormat(),
+                        false),
+                enumProperty(
+                        COMPRESSION_CODEC,
+                        "Compression codec to use when writing files",
+                        HiveCompressionCodec.class,
+                        hiveConfig.getHiveCompressionCodec(),
+                        false),
+                booleanProperty(
+                        PARTITION_USE_COLUMN_NAMES,
+                        "Access partition columns by names",
+                        hiveConfig.getPartitionUseColumnNames(),
                         false),
                 booleanProperty(
                         RESPECT_TABLE_FORMAT,
@@ -219,43 +265,48 @@ public final class HiveSessionProperties
                         hiveConfig.isRespectTableFormat(),
                         false),
                 booleanProperty(
+                        CREATE_EMPTY_BUCKET_FILES,
+                        "Create empty files for buckets that have no data",
+                        hiveConfig.isCreateEmptyBucketFiles(),
+                        false),
+                booleanProperty(
                         PARQUET_USE_COLUMN_NAME,
-                        "Experimental: Parquet: Access Parquet columns using names from the file",
+                        "Parquet: Access Parquet columns using names from the file",
                         hiveConfig.isUseParquetColumnNames(),
                         false),
                 booleanProperty(
-                        PARQUET_FAIL_WITH_CORRUPTED_STATISTICS,
-                        "Parquet: Fail when scanning Parquet files with corrupted statistics",
-                        hiveConfig.isFailOnCorruptedParquetStatistics(),
+                        PARQUET_IGNORE_STATISTICS,
+                        "Ignore statistics from Parquet to allow querying files with corrupted or incorrect statistics",
+                        parquetReaderConfig.isIgnoreStatistics(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         PARQUET_MAX_READ_BLOCK_SIZE,
                         "Parquet: Maximum size of a block to read",
-                        hiveConfig.getParquetMaxReadBlockSize(),
+                        parquetReaderConfig.getMaxReadBlockSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         PARQUET_WRITER_BLOCK_SIZE,
                         "Parquet: Writer block size",
-                        parquetFileWriterConfig.getBlockSize(),
+                        parquetWriterConfig.getBlockSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         PARQUET_WRITER_PAGE_SIZE,
                         "Parquet: Writer page size",
-                        parquetFileWriterConfig.getPageSize(),
+                        parquetWriterConfig.getPageSize(),
                         false),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         MAX_SPLIT_SIZE,
                         "Max split size",
                         hiveConfig.getMaxSplitSize(),
                         true),
-                dataSizeSessionProperty(
+                dataSizeProperty(
                         MAX_INITIAL_SPLIT_SIZE,
                         "Max initial split size",
                         hiveConfig.getMaxInitialSplitSize(),
                         true),
                 booleanProperty(
                         RCFILE_OPTIMIZED_WRITER_VALIDATE,
-                        "Experimental: RCFile: Validate writer files",
+                        "RCFile: Validate writer files",
                         hiveConfig.isRcfileWriterValidate(),
                         false),
                 booleanProperty(
@@ -265,7 +316,7 @@ public final class HiveSessionProperties
                         false),
                 booleanProperty(
                         STATISTICS_ENABLED,
-                        "Experimental: Expose table statistics",
+                        "Expose table statistics",
                         hiveConfig.isTableStatisticsEnabled(),
                         false),
                 integerProperty(
@@ -280,12 +331,12 @@ public final class HiveSessionProperties
                         false),
                 booleanProperty(
                         COLLECT_COLUMN_STATISTICS_ON_WRITE,
-                        "Experimental: Enables automatic column level statistics collection on write",
+                        "Enables automatic column level statistics collection on write",
                         hiveConfig.isCollectColumnStatisticsOnWrite(),
                         false),
                 booleanProperty(
                         OPTIMIZE_MISMATCHED_BUCKET_COUNT,
-                        "Experimenal: Enable optimization to avoid shuffle when bucket count is compatible but not the same",
+                        "Experimental: Enable optimization to avoid shuffle when bucket count is compatible but not the same",
                         hiveConfig.isOptimizeMismatchedBucketCount(),
                         false),
                 booleanProperty(
@@ -302,6 +353,37 @@ public final class HiveSessionProperties
                         TEMPORARY_STAGING_DIRECTORY_PATH,
                         "Temporary staging directory location",
                         hiveConfig.getTemporaryStagingDirectoryPath(),
+                        false),
+                booleanProperty(
+                        IGNORE_ABSENT_PARTITIONS,
+                        "Ignore partitions when the file system location does not exist rather than failing the query.",
+                        hiveConfig.isIgnoreAbsentPartitions(),
+                        false),
+                booleanProperty(
+                        QUERY_PARTITION_FILTER_REQUIRED,
+                        "Require filter on partition column",
+                        hiveConfig.isQueryPartitionFilterRequired(),
+                        false),
+                booleanProperty(
+                        PROJECTION_PUSHDOWN_ENABLED,
+                        "Projection push down enabled for hive",
+                        hiveConfig.isProjectionPushdownEnabled(),
+                        false),
+                enumProperty(
+                        TIMESTAMP_PRECISION,
+                        "Precision for timestamp columns in Hive tables",
+                        HiveTimestampPrecision.class,
+                        hiveConfig.getTimestampPrecision(),
+                        false),
+                booleanProperty(
+                        PARQUET_OPTIMIZED_WRITER_ENABLED,
+                        "Experimental: Enable optimized writer",
+                        parquetWriterConfig.isParquetOptimizedWriterEnabled(),
+                        false),
+                durationProperty(
+                        DYNAMIC_FILTERING_PROBE_BLOCKING_TIMEOUT,
+                        "Duration to wait for completion of dynamic filters during split generation for probe side table",
+                        hiveConfig.getDynamicFilteringProbeBlockingTimeout(),
                         false));
     }
 
@@ -360,6 +442,11 @@ public final class HiveSessionProperties
         return session.getProperty(ORC_LAZY_READ_SMALL_RANGES, Boolean.class);
     }
 
+    public static boolean isOrcNestedLazy(ConnectorSession session)
+    {
+        return session.getProperty(ORC_NESTED_LAZY_ENABLED, Boolean.class);
+    }
+
     public static DataSize getOrcStringStatisticsLimit(ConnectorSession session)
     {
         return session.getProperty(ORC_STRING_STATISTICS_LIMIT, DataSize.class);
@@ -377,14 +464,14 @@ public final class HiveSessionProperties
             return false;
         }
 
-        // session property can not force validation when sampling is enabled
+        // session property cannot force validation when sampling is enabled
         // todo change this if session properties support null
         return ThreadLocalRandom.current().nextDouble(100) < percentage;
     }
 
     public static OrcWriteValidationMode getOrcOptimizedWriterValidateMode(ConnectorSession session)
     {
-        return OrcWriteValidationMode.valueOf(session.getProperty(ORC_OPTIMIZED_WRITER_VALIDATE_MODE, String.class).toUpperCase(ENGLISH));
+        return session.getProperty(ORC_OPTIMIZED_WRITER_VALIDATE_MODE, OrcWriteValidationMode.class);
     }
 
     public static DataSize getOrcOptimizedWriterMinStripeSize(ConnectorSession session)
@@ -407,9 +494,30 @@ public final class HiveSessionProperties
         return session.getProperty(ORC_OPTIMIZED_WRITER_MAX_DICTIONARY_MEMORY, DataSize.class);
     }
 
+    public static boolean isUseOrcColumnNames(ConnectorSession session)
+    {
+        Boolean useOrcColumnNames = session.getProperty(ORC_USE_COLUMN_NAME, Boolean.class);
+        if (isPartitionUseColumnNames(session) && !useOrcColumnNames) {
+            throw new PrestoException(
+                    INVALID_SESSION_PROPERTY,
+                    format("%s must be set when %s is set", ORC_USE_COLUMN_NAME, PARTITION_USE_COLUMN_NAMES));
+        }
+        return useOrcColumnNames;
+    }
+
     public static HiveStorageFormat getHiveStorageFormat(ConnectorSession session)
     {
-        return HiveStorageFormat.valueOf(session.getProperty(HIVE_STORAGE_FORMAT, String.class).toUpperCase(ENGLISH));
+        return session.getProperty(HIVE_STORAGE_FORMAT, HiveStorageFormat.class);
+    }
+
+    public static HiveCompressionCodec getCompressionCodec(ConnectorSession session)
+    {
+        return session.getProperty(COMPRESSION_CODEC, HiveCompressionCodec.class);
+    }
+
+    public static boolean isPartitionUseColumnNames(ConnectorSession session)
+    {
+        return session.getProperty(PARTITION_USE_COLUMN_NAMES, Boolean.class);
     }
 
     public static boolean isRespectTableFormat(ConnectorSession session)
@@ -417,14 +525,26 @@ public final class HiveSessionProperties
         return session.getProperty(RESPECT_TABLE_FORMAT, Boolean.class);
     }
 
-    public static boolean isUseParquetColumnNames(ConnectorSession session)
+    public static boolean isCreateEmptyBucketFiles(ConnectorSession session)
     {
-        return session.getProperty(PARQUET_USE_COLUMN_NAME, Boolean.class);
+        return session.getProperty(CREATE_EMPTY_BUCKET_FILES, Boolean.class);
     }
 
-    public static boolean isFailOnCorruptedParquetStatistics(ConnectorSession session)
+    public static boolean isUseParquetColumnNames(ConnectorSession session)
     {
-        return session.getProperty(PARQUET_FAIL_WITH_CORRUPTED_STATISTICS, Boolean.class);
+        boolean useParquetColumnNames = session.getProperty(PARQUET_USE_COLUMN_NAME, Boolean.class);
+        boolean partitionUseColumnNames = isPartitionUseColumnNames(session);
+        if (partitionUseColumnNames && !useParquetColumnNames) {
+            throw new PrestoException(
+                    INVALID_SESSION_PROPERTY,
+                    format("%s must be set when %s is set", PARQUET_USE_COLUMN_NAME, PARTITION_USE_COLUMN_NAMES));
+        }
+        return useParquetColumnNames;
+    }
+
+    public static boolean isParquetIgnoreStatistics(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_IGNORE_STATISTICS, Boolean.class);
     }
 
     public static DataSize getParquetMaxReadBlockSize(ConnectorSession session)
@@ -506,16 +626,33 @@ public final class HiveSessionProperties
         return session.getProperty(TEMPORARY_STAGING_DIRECTORY_PATH, String.class);
     }
 
-    public static PropertyMetadata<DataSize> dataSizeSessionProperty(String name, String description, DataSize defaultValue, boolean hidden)
+    public static boolean isIgnoreAbsentPartitions(ConnectorSession session)
     {
-        return new PropertyMetadata<>(
-                name,
-                description,
-                createUnboundedVarcharType(),
-                DataSize.class,
-                defaultValue,
-                hidden,
-                value -> DataSize.valueOf((String) value),
-                DataSize::toString);
+        return session.getProperty(IGNORE_ABSENT_PARTITIONS, Boolean.class);
+    }
+
+    public static boolean isQueryPartitionFilterRequired(ConnectorSession session)
+    {
+        return session.getProperty(QUERY_PARTITION_FILTER_REQUIRED, Boolean.class);
+    }
+
+    public static boolean isProjectionPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(PROJECTION_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static HiveTimestampPrecision getTimestampPrecision(ConnectorSession session)
+    {
+        return session.getProperty(TIMESTAMP_PRECISION, HiveTimestampPrecision.class);
+    }
+
+    public static boolean isParquetOptimizedWriterEnabled(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_OPTIMIZED_WRITER_ENABLED, Boolean.class);
+    }
+
+    public static Duration getDynamicFilteringProbeBlockingTimeout(ConnectorSession session)
+    {
+        return session.getProperty(DYNAMIC_FILTERING_PROBE_BLOCKING_TIMEOUT, Duration.class);
     }
 }

@@ -16,19 +16,23 @@ package io.prestosql.operator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import io.prestosql.Session;
 import io.prestosql.memory.context.LocalMemoryContext;
+import io.prestosql.memory.context.MemoryTrackingContext;
 import io.prestosql.metadata.Split;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorPageSource;
+import io.prestosql.spi.connector.DynamicFilter;
+import io.prestosql.spi.connector.EmptyPageSource;
 import io.prestosql.spi.connector.UpdatablePageSource;
 import io.prestosql.split.EmptySplit;
-import io.prestosql.split.EmptySplitPageSource;
 import io.prestosql.split.PageSourceProvider;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 
-import java.io.Closeable;
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
@@ -41,16 +45,17 @@ import static io.airlift.concurrent.MoreFutures.toListenableFuture;
 import static java.util.Objects.requireNonNull;
 
 public class TableScanOperator
-        implements SourceOperator, Closeable
+        implements SourceOperator
 {
     public static class TableScanOperatorFactory
-            implements SourceOperatorFactory
+            implements SourceOperatorFactory, WorkProcessorSourceOperatorFactory
     {
         private final int operatorId;
         private final PlanNodeId sourceId;
         private final PageSourceProvider pageSourceProvider;
         private final TableHandle table;
         private final List<ColumnHandle> columns;
+        private final DynamicFilter dynamicFilter;
         private boolean closed;
 
         public TableScanOperatorFactory(
@@ -58,13 +63,21 @@ public class TableScanOperator
                 PlanNodeId sourceId,
                 PageSourceProvider pageSourceProvider,
                 TableHandle table,
-                Iterable<ColumnHandle> columns)
+                Iterable<ColumnHandle> columns,
+                DynamicFilter dynamicFilter)
         {
             this.operatorId = operatorId;
             this.sourceId = requireNonNull(sourceId, "sourceId is null");
             this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
             this.table = requireNonNull(table, "table is null");
             this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+            this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
+        }
+
+        @Override
+        public int getOperatorId()
+        {
+            return operatorId;
         }
 
         @Override
@@ -74,16 +87,46 @@ public class TableScanOperator
         }
 
         @Override
+        public PlanNodeId getPlanNodeId()
+        {
+            return sourceId;
+        }
+
+        @Override
+        public String getOperatorType()
+        {
+            return TableScanOperator.class.getSimpleName();
+        }
+
+        @Override
         public SourceOperator createOperator(DriverContext driverContext)
         {
             checkState(!closed, "Factory is already closed");
-            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, sourceId, TableScanOperator.class.getSimpleName());
+            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, sourceId, getOperatorType());
             return new TableScanOperator(
                     operatorContext,
                     sourceId,
                     pageSourceProvider,
                     table,
-                    columns);
+                    columns,
+                    dynamicFilter);
+        }
+
+        @Override
+        public WorkProcessorSourceOperator create(
+                Session session,
+                MemoryTrackingContext memoryTrackingContext,
+                DriverYieldSignal yieldSignal,
+                WorkProcessor<Split> splits)
+        {
+            return new TableScanWorkProcessorOperator(
+                    session,
+                    memoryTrackingContext,
+                    splits,
+                    pageSourceProvider,
+                    table,
+                    columns,
+                    dynamicFilter);
         }
 
         @Override
@@ -98,10 +141,13 @@ public class TableScanOperator
     private final PageSourceProvider pageSourceProvider;
     private final TableHandle table;
     private final List<ColumnHandle> columns;
+    private final DynamicFilter dynamicFilter;
     private final LocalMemoryContext systemMemoryContext;
     private final SettableFuture<?> blocked = SettableFuture.create();
 
+    @Nullable
     private Split split;
+    @Nullable
     private ConnectorPageSource source;
 
     private boolean finished;
@@ -114,13 +160,15 @@ public class TableScanOperator
             PlanNodeId planNodeId,
             PageSourceProvider pageSourceProvider,
             TableHandle table,
-            Iterable<ColumnHandle> columns)
+            Iterable<ColumnHandle> columns,
+            DynamicFilter dynamicFilter)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
         this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
         this.table = requireNonNull(table, "table is null");
         this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+        this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
         this.systemMemoryContext = operatorContext.newLocalSystemMemoryContext(TableScanOperator.class.getSimpleName());
     }
 
@@ -156,7 +204,7 @@ public class TableScanOperator
         blocked.set(null);
 
         if (split.getConnectorSplit() instanceof EmptySplit) {
-            source = new EmptySplitPageSource();
+            source = new EmptyPageSource();
         }
 
         return () -> {
@@ -234,7 +282,7 @@ public class TableScanOperator
     @Override
     public void addInput(Page page)
     {
-        throw new UnsupportedOperationException(getClass().getName() + " can not take input");
+        throw new UnsupportedOperationException(getClass().getName() + " cannot take input");
     }
 
     @Override
@@ -244,7 +292,10 @@ public class TableScanOperator
             return null;
         }
         if (source == null) {
-            source = pageSourceProvider.createPageSource(operatorContext.getSession(), split, table, columns);
+            if (!dynamicFilter.getCurrentPredicate().isAll()) {
+                operatorContext.recordDynamicFilterSplitProcessed(1L);
+            }
+            source = pageSourceProvider.createPageSource(operatorContext.getSession(), split, table, columns, dynamicFilter);
         }
 
         Page page = source.getNextPage();

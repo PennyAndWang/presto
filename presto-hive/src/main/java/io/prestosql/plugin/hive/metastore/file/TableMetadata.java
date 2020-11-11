@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.prestosql.plugin.hive.metastore.StorageFormat.VIEW_STORAGE_FORMAT;
@@ -83,7 +84,7 @@ public class TableMetadata
             checkArgument(externalLocation.isPresent(), "External location is required for external tables");
         }
         else {
-            checkArgument(!externalLocation.isPresent(), "External location is only allowed for external tables");
+            checkArgument(externalLocation.isEmpty(), "External location is only allowed for external tables");
         }
 
         this.viewOriginalText = requireNonNull(viewOriginalText, "viewOriginalText is null");
@@ -279,6 +280,7 @@ public class TableMetadata
                 partitionColumns,
                 parameters,
                 viewOriginalText,
-                viewExpandedText);
+                viewExpandedText,
+                OptionalLong.empty());
     }
 }

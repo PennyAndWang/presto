@@ -19,7 +19,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.memory.context.LocalMemoryContext;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.block.Block;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.spi.type.Type;
 import io.prestosql.spiller.Spiller;
 import io.prestosql.spiller.SpillerFactory;
@@ -33,6 +33,7 @@ import java.util.Optional;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterators.transform;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
@@ -255,6 +256,9 @@ public class OrderByOperator
         requireNonNull(page, "page is null");
         checkSuccess(spillInProgress, "spilling failed");
 
+        // TODO: remove when retained memory accounting for pages does not
+        // count shared data structures multiple times
+        page.compact();
         pageIndex.addPage(page);
         updateMemoryUsage();
     }
@@ -267,14 +271,14 @@ public class OrderByOperator
             return null;
         }
 
-        verify(sortedPages != null, "sortedPages is null");
+        verifyNotNull(sortedPages, "sortedPages is null");
         if (!sortedPages.hasNext()) {
             state = State.FINISHED;
             return null;
         }
 
         Optional<Page> next = sortedPages.next();
-        if (!next.isPresent()) {
+        if (next.isEmpty()) {
             return null;
         }
         Page nextPage = next.get();
@@ -304,7 +308,7 @@ public class OrderByOperator
 
         // TODO try pageIndex.compact(); before spilling, as in com.facebook.presto.operator.HashBuilderOperator.startMemoryRevoke
 
-        if (!spiller.isPresent()) {
+        if (spiller.isEmpty()) {
             spiller = Optional.of(spillerFactory.get().create(
                     sourceTypes,
                     operatorContext.getSpillContext(),
@@ -330,7 +334,7 @@ public class OrderByOperator
 
     private List<WorkProcessor<Page>> getSpilledPages()
     {
-        if (!spiller.isPresent()) {
+        if (spiller.isEmpty()) {
             return ImmutableList.of();
         }
 

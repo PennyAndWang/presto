@@ -23,8 +23,6 @@ import io.airlift.stats.Distribution.DistributionSnapshot;
 import io.prestosql.SessionRepresentation;
 import io.prestosql.client.NodeVersion;
 import io.prestosql.connector.CatalogName;
-import io.prestosql.cost.PlanCostEstimate;
-import io.prestosql.cost.PlanNodeStatsEstimate;
 import io.prestosql.cost.StatsAndCosts;
 import io.prestosql.eventlistener.EventListenerManager;
 import io.prestosql.execution.Column;
@@ -35,7 +33,6 @@ import io.prestosql.execution.QueryStats;
 import io.prestosql.execution.StageInfo;
 import io.prestosql.execution.TaskInfo;
 import io.prestosql.execution.TaskState;
-import io.prestosql.metadata.FunctionRegistry;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.SessionPropertyManager;
 import io.prestosql.operator.OperatorStats;
@@ -53,9 +50,9 @@ import io.prestosql.spi.eventlistener.QueryMetadata;
 import io.prestosql.spi.eventlistener.QueryOutputMetadata;
 import io.prestosql.spi.eventlistener.QueryStatistics;
 import io.prestosql.spi.eventlistener.StageCpuDistribution;
+import io.prestosql.spi.resourcegroups.QueryType;
 import io.prestosql.spi.resourcegroups.ResourceGroupId;
-import io.prestosql.sql.planner.PlanFragment;
-import io.prestosql.sql.planner.plan.PlanNodeId;
+import io.prestosql.sql.planner.planprinter.ValuePrinter;
 import io.prestosql.transaction.TransactionId;
 import org.joda.time.DateTime;
 
@@ -88,7 +85,6 @@ public class QueryMonitor
     private final String serverAddress;
     private final String environment;
     private final SessionPropertyManager sessionPropertyManager;
-    private final FunctionRegistry functionRegistry;
     private final Metadata metadata;
     private final int maxJsonLimit;
 
@@ -115,7 +111,6 @@ public class QueryMonitor
         this.environment = requireNonNull(nodeInfo, "nodeInfo is null").getEnvironment();
         this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
-        this.functionRegistry = metadata.getFunctionRegistry();
         this.maxJsonLimit = toIntExact(requireNonNull(config, "config is null").getMaxOutputStageJsonSize().toBytes());
     }
 
@@ -124,12 +119,16 @@ public class QueryMonitor
         eventListenerManager.queryCreated(
                 new QueryCreatedEvent(
                         queryInfo.getQueryStats().getCreateTime().toDate().toInstant(),
-                        createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId()),
+                        createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId(), queryInfo.getQueryType()),
                         new QueryMetadata(
                                 queryInfo.getQueryId().toString(),
                                 queryInfo.getSession().getTransactionId().map(TransactionId::toString),
                                 queryInfo.getQuery(),
+                                queryInfo.getUpdateType(),
+                                queryInfo.getPreparedQuery(),
                                 QUEUED.toString(),
+                                ImmutableList.of(),
+                                ImmutableList.of(),
                                 queryInfo.getSelf(),
                                 Optional.empty(),
                                 Optional.empty())));
@@ -142,14 +141,19 @@ public class QueryMonitor
                         queryInfo.getQueryId().toString(),
                         queryInfo.getSession().getTransactionId().map(TransactionId::toString),
                         queryInfo.getQuery(),
+                        queryInfo.getUpdateType(),
+                        queryInfo.getPreparedQuery(),
                         queryInfo.getState().toString(),
+                        ImmutableList.of(),
+                        ImmutableList.of(),
                         queryInfo.getSelf(),
                         Optional.empty(),
                         Optional.empty()),
                 new QueryStatistics(
                         ofMillis(0),
                         ofMillis(0),
-                        ofMillis(0),
+                        ofMillis(queryInfo.getQueryStats().getQueuedTime().toMillis()),
+                        Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
@@ -174,12 +178,12 @@ public class QueryMonitor
                         ImmutableList.of(),
                         ImmutableList.of(),
                         Optional.empty()),
-                createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId()),
+                createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId(), queryInfo.getQueryType()),
                 new QueryIOMetadata(ImmutableList.of(), Optional.empty()),
                 createQueryFailureInfo(failure, Optional.empty()),
                 ImmutableList.of(),
                 ofEpochMilli(queryInfo.getQueryStats().getCreateTime().getMillis()),
-                ofEpochMilli(queryInfo.getQueryStats().getCreateTime().getMillis()),
+                ofEpochMilli(queryInfo.getQueryStats().getEndTime().getMillis()),
                 ofEpochMilli(queryInfo.getQueryStats().getEndTime().getMillis())));
 
         logQueryTimeline(queryInfo);
@@ -192,7 +196,7 @@ public class QueryMonitor
                 new QueryCompletedEvent(
                         createQueryMetadata(queryInfo),
                         createQueryStatistics(queryInfo),
-                        createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId()),
+                        createQueryContext(queryInfo.getSession(), queryInfo.getResourceGroupId(), queryInfo.getQueryType()),
                         getQueryIOMetadata(queryInfo),
                         createQueryFailureInfo(queryInfo.getFailureInfo(), queryInfo.getOutputStage()),
                         queryInfo.getWarnings(),
@@ -209,7 +213,11 @@ public class QueryMonitor
                 queryInfo.getQueryId().toString(),
                 queryInfo.getSession().getTransactionId().map(TransactionId::toString),
                 queryInfo.getQuery(),
+                Optional.ofNullable(queryInfo.getUpdateType()),
+                queryInfo.getPreparedQuery(),
                 queryInfo.getState().toString(),
+                queryInfo.getReferencedTables(),
+                queryInfo.getRoutines(),
                 queryInfo.getSelf(),
                 createTextQueryPlan(queryInfo),
                 queryInfo.getOutputStage().flatMap(stage -> stageInfoCodec.toJsonWithLengthLimit(stage, maxJsonLimit)));
@@ -222,19 +230,20 @@ public class QueryMonitor
             operatorSummaries.add(operatorStatsCodec.toJson(summary));
         }
 
-        Optional<StatsAndCosts> planNodeStatsAndCosts = queryInfo.getOutputStage().map(QueryMonitor::reconstructStatsAndCosts);
+        Optional<StatsAndCosts> planNodeStatsAndCosts = queryInfo.getOutputStage().map(StatsAndCosts::create);
         Optional<String> serializedPlanNodeStatsAndCosts = planNodeStatsAndCosts.map(statsAndCostsCodec::toJson);
 
         QueryStats queryStats = queryInfo.getQueryStats();
         return new QueryStatistics(
                 ofMillis(queryStats.getTotalCpuTime().toMillis()),
-                ofMillis(queryStats.getTotalScheduledTime().toMillis()),
+                ofMillis(queryStats.getElapsedTime().toMillis()),
                 ofMillis(queryStats.getQueuedTime().toMillis()),
                 Optional.of(ofMillis(queryStats.getResourceWaitingTime().toMillis())),
                 Optional.of(ofMillis(queryStats.getAnalysisTime().toMillis())),
-                Optional.of(ofMillis(queryStats.getDistributedPlanningTime().toMillis())),
+                Optional.of(ofMillis(queryStats.getPlanningTime().toMillis())),
+                Optional.of(ofMillis(queryStats.getExecutionTime().toMillis())),
                 queryStats.getPeakUserMemoryReservation().toBytes(),
-                queryStats.getPeakTotalMemoryReservation().toBytes(),
+                queryStats.getPeakNonRevocableMemoryReservation().toBytes(),
                 queryStats.getPeakTaskUserMemory().toBytes(),
                 queryStats.getPeakTaskTotalMemory().toBytes(),
                 queryStats.getPhysicalInputDataSize().toBytes(),
@@ -256,34 +265,12 @@ public class QueryMonitor
                 serializedPlanNodeStatsAndCosts);
     }
 
-    private static StatsAndCosts reconstructStatsAndCosts(StageInfo stageInfo)
-    {
-        ImmutableMap.Builder<PlanNodeId, PlanNodeStatsEstimate> planNodeStats = ImmutableMap.builder();
-        ImmutableMap.Builder<PlanNodeId, PlanCostEstimate> planNodeCosts = ImmutableMap.builder();
-        reconstructStatsAndCosts(stageInfo, planNodeStats, planNodeCosts);
-        return new StatsAndCosts(planNodeStats.build(), planNodeCosts.build());
-    }
-
-    private static void reconstructStatsAndCosts(
-            StageInfo stage,
-            ImmutableMap.Builder<PlanNodeId, PlanNodeStatsEstimate> planNodeStats,
-            ImmutableMap.Builder<PlanNodeId, PlanCostEstimate> planNodeCosts)
-    {
-        PlanFragment planFragment = stage.getPlan();
-        if (planFragment != null) {
-            planNodeStats.putAll(planFragment.getStatsAndCosts().getStats());
-            planNodeCosts.putAll(planFragment.getStatsAndCosts().getCosts());
-        }
-        for (StageInfo subStage : stage.getSubStages()) {
-            reconstructStatsAndCosts(subStage, planNodeStats, planNodeCosts);
-        }
-    }
-
-    private QueryContext createQueryContext(SessionRepresentation session, Optional<ResourceGroupId> resourceGroup)
+    private QueryContext createQueryContext(SessionRepresentation session, Optional<ResourceGroupId> resourceGroup, Optional<QueryType> queryType)
     {
         return new QueryContext(
                 session.getUser(),
                 session.getPrincipal(),
+                session.getGroups(),
                 session.getTraceToken(),
                 session.getRemoteUserAddress(),
                 session.getUserAgent(),
@@ -298,7 +285,8 @@ public class QueryMonitor
                 session.getResourceEstimates(),
                 serverAddress,
                 serverVersion,
-                environment);
+                environment,
+                queryType);
     }
 
     private Optional<String> createTextQueryPlan(QueryInfo queryInfo)
@@ -307,15 +295,13 @@ public class QueryMonitor
             if (queryInfo.getOutputStage().isPresent()) {
                 return Optional.of(textDistributedPlan(
                         queryInfo.getOutputStage().get(),
-                        functionRegistry,
-                        Optional.empty(), // transaction is no longer active, so metadata is useless
-                        queryInfo.getSession().toSession(sessionPropertyManager),
+                        new ValuePrinter(metadata, queryInfo.getSession().toSession(sessionPropertyManager)),
                         false));
             }
         }
         catch (Exception e) {
             // Sometimes it is expected to fail. For example if generated plan is too long.
-            // Don't fail to create event if the plan can not be created.
+            // Don't fail to create event if the plan cannot be created.
             log.warn(e, "Error creating explain plan for query %s", queryInfo.getQueryId());
         }
         return Optional.empty();
@@ -326,7 +312,7 @@ public class QueryMonitor
         ImmutableList.Builder<QueryInputMetadata> inputs = ImmutableList.builder();
         for (Input input : queryInfo.getInputs()) {
             inputs.add(new QueryInputMetadata(
-                    input.getCatalogName().getCatalogName(),
+                    input.getCatalogName(),
                     input.getSchema(),
                     input.getTable(),
                     input.getColumns().stream()
@@ -344,7 +330,7 @@ public class QueryMonitor
 
             output = Optional.of(
                     new QueryOutputMetadata(
-                            queryInfo.getOutput().get().getCatalogName().getCatalogName(),
+                            queryInfo.getOutput().get().getCatalogName(),
                             queryInfo.getOutput().get().getSchema(),
                             queryInfo.getOutput().get().getTable(),
                             tableFinishInfo.map(TableFinishInfo::getConnectorOutputMetadata),
@@ -415,7 +401,7 @@ public class QueryMonitor
             }
 
             // planning duration -- start to end of planning
-            long planning = queryStats.getTotalPlanningTime().toMillis();
+            long planning = queryStats.getPlanningTime().toMillis();
 
             // Time spent waiting for required no. of worker nodes to be present
             long waiting = queryStats.getResourceWaitingTime().toMillis();
@@ -525,7 +511,7 @@ public class QueryMonitor
 
     private static List<StageCpuDistribution> getCpuDistributions(QueryInfo queryInfo)
     {
-        if (!queryInfo.getOutputStage().isPresent()) {
+        if (queryInfo.getOutputStage().isEmpty()) {
             return ImmutableList.of();
         }
 
@@ -556,14 +542,14 @@ public class QueryMonitor
         return new StageCpuDistribution(
                 stageInfo.getStageId().getId(),
                 stageInfo.getTasks().size(),
-                snapshot.getP25(),
-                snapshot.getP50(),
-                snapshot.getP75(),
-                snapshot.getP90(),
-                snapshot.getP95(),
-                snapshot.getP99(),
-                snapshot.getMin(),
-                snapshot.getMax(),
+                (long) snapshot.getP25(),
+                (long) snapshot.getP50(),
+                (long) snapshot.getP75(),
+                (long) snapshot.getP90(),
+                (long) snapshot.getP95(),
+                (long) snapshot.getP99(),
+                (long) snapshot.getMin(),
+                (long) snapshot.getMax(),
                 (long) snapshot.getTotal(),
                 snapshot.getTotal() / snapshot.getCount());
     }

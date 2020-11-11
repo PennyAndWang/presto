@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.log.Logger;
 import io.airlift.log.Logging;
 import io.prestosql.Session;
-import io.prestosql.tests.DistributedQueryRunner;
+import io.prestosql.testing.DistributedQueryRunner;
 
 import java.util.Map;
 
@@ -49,7 +49,6 @@ public final class TpcdsQueryRunner
                 .build();
 
         DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session)
-                .setNodeCount(4)
                 .setExtraProperties(extraProperties)
                 .setCoordinatorProperties(coordinatorProperties)
                 .build();

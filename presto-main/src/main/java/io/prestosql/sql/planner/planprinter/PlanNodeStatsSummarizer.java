@@ -33,13 +33,12 @@ import java.util.Set;
 
 import static com.google.common.collect.Iterables.getLast;
 import static com.google.common.collect.Lists.reverse;
-import static io.airlift.units.DataSize.Unit.BYTE;
-import static io.airlift.units.DataSize.succinctDataSize;
+import static io.airlift.units.DataSize.succinctBytes;
 import static io.prestosql.util.MoreMaps.mergeMaps;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.toList;
 
-public class PlanNodeStatsSummarizer
+public final class PlanNodeStatsSummarizer
 {
     private PlanNodeStatsSummarizer() {}
 
@@ -58,7 +57,7 @@ public class PlanNodeStatsSummarizer
                 .flatMap(taskStats -> getPlanNodeStats(taskStats).stream())
                 .collect(toList());
         for (PlanNodeStats stats : planNodeStats) {
-            aggregatedStats.merge(stats.getPlanNodeId(), stats, (left, right) -> left.mergeWith(right));
+            aggregatedStats.merge(stats.getPlanNodeId(), stats, PlanNodeStats::mergeWith);
         }
         return aggregatedStats;
     }
@@ -136,7 +135,7 @@ public class PlanNodeStatsSummarizer
                 // The only statistics we have for Window Functions are very low level, thus displayed only in VERBOSE mode
                 if (operatorStats.getInfo() instanceof WindowInfo) {
                     WindowInfo windowInfo = (WindowInfo) operatorStats.getInfo();
-                    windowNodeStats.merge(planNodeId, WindowOperatorStats.create(windowInfo), (left, right) -> left.mergeWith(right));
+                    windowNodeStats.merge(planNodeId, WindowOperatorStats.create(windowInfo), WindowOperatorStats::mergeWith);
                 }
 
                 planNodeInputPositions.merge(planNodeId, operatorStats.getInputPositions(), Long::sum);
@@ -183,9 +182,9 @@ public class PlanNodeStatsSummarizer
                         new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
                         new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
                         planNodeInputPositions.get(planNodeId),
-                        succinctDataSize(planNodeInputBytes.get(planNodeId), BYTE),
+                        succinctBytes(planNodeInputBytes.get(planNodeId)),
                         outputPositions,
-                        succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
+                        succinctBytes(planNodeOutputBytes.getOrDefault(planNodeId, 0L)),
                         operatorInputStats.get(planNodeId),
                         operatorHashCollisionsStats.get(planNodeId));
             }
@@ -195,9 +194,9 @@ public class PlanNodeStatsSummarizer
                         new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
                         new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
                         planNodeInputPositions.get(planNodeId),
-                        succinctDataSize(planNodeInputBytes.get(planNodeId), BYTE),
+                        succinctBytes(planNodeInputBytes.get(planNodeId)),
                         outputPositions,
-                        succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
+                        succinctBytes(planNodeOutputBytes.getOrDefault(planNodeId, 0L)),
                         operatorInputStats.get(planNodeId),
                         windowNodeStats.get(planNodeId));
             }
@@ -207,9 +206,9 @@ public class PlanNodeStatsSummarizer
                         new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
                         new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
                         planNodeInputPositions.get(planNodeId),
-                        succinctDataSize(planNodeInputBytes.get(planNodeId), BYTE),
+                        succinctBytes(planNodeInputBytes.get(planNodeId)),
                         outputPositions,
-                        succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
+                        succinctBytes(planNodeOutputBytes.getOrDefault(planNodeId, 0L)),
                         operatorInputStats.get(planNodeId));
             }
 

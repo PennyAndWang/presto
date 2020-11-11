@@ -77,6 +77,8 @@ public class TestClusterMemoryLeakDetector
                 true,
                 URI.create("1"),
                 "",
+                Optional.empty(),
+                Optional.empty(),
                 new BasicQueryStats(
                         DateTime.parse("1991-09-06T05:00-05:30"),
                         DateTime.parse("1991-09-06T05:01-05:30"),
@@ -89,6 +91,7 @@ public class TestClusterMemoryLeakDetector
                         100,
                         DataSize.valueOf("21GB"),
                         22,
+                        DataSize.valueOf("20GB"),
                         23,
                         DataSize.valueOf("23GB"),
                         DataSize.valueOf("24GB"),
@@ -100,6 +103,7 @@ public class TestClusterMemoryLeakDetector
                         ImmutableSet.of(WAITING_FOR_MEMORY),
                         OptionalDouble.of(20)),
                 null,
-                null);
+                null,
+                Optional.empty());
     }
 }

@@ -13,29 +13,70 @@
  */
 package io.prestosql.plugin.cassandra;
 
+import com.google.common.collect.ImmutableMap;
+import io.prestosql.testing.AbstractTestDistributedQueries;
 import io.prestosql.testing.MaterializedResult;
-import io.prestosql.tests.AbstractTestDistributedQueries;
-import org.testng.annotations.Test;
+import io.prestosql.testing.QueryRunner;
+import io.prestosql.testing.sql.TestTable;
+import io.prestosql.tpch.TpchTable;
+import org.testng.SkipException;
+import org.testng.annotations.AfterClass;
 
+import java.util.Optional;
+
+import static io.prestosql.plugin.cassandra.CassandraQueryRunner.createCassandraQueryRunner;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.testing.MaterializedResult.resultBuilder;
 import static io.prestosql.testing.assertions.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-//Integrations tests fail when parallel, due to a bug or configuration error in the embedded
-//cassandra instance. This problem results in either a hang in Thrift calls or broken sockets.
-@Test(singleThreaded = true)
 public class TestCassandraDistributedQueries
         extends AbstractTestDistributedQueries
 {
-    public TestCassandraDistributedQueries()
+    private CassandraServer server;
+
+    @Override
+    protected QueryRunner createQueryRunner()
+            throws Exception
     {
-        super(CassandraQueryRunner::createCassandraQueryRunner);
+        this.server = new CassandraServer();
+        return createCassandraQueryRunner(server, ImmutableMap.of(), TpchTable.getTables());
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void tearDown()
+    {
+        server.close();
+    }
+
+    @Override
+    protected boolean supportsDelete()
+    {
+        return false;
     }
 
     @Override
     protected boolean supportsViews()
     {
         return false;
+    }
+
+    @Override
+    protected boolean supportsCommentOnTable()
+    {
+        return false;
+    }
+
+    @Override
+    protected boolean supportsCommentOnColumn()
+    {
+        return false;
+    }
+
+    @Override
+    public void testCreateSchema()
+    {
+        // Cassandra does not support creating schemas
     }
 
     @Override
@@ -63,29 +104,21 @@ public class TestCassandraDistributedQueries
     }
 
     @Override
-    public void testInsert()
+    public void testInsertWithCoercion()
     {
-        // Cassandra connector currently does not support create table
-        // TODO test inserts
+        // TODO
+        assertThatThrownBy(super::testInsertWithCoercion)
+                .hasMessage("unsupported type: decimal(5,3)");
+        throw new SkipException("TODO change test to use supported types");
     }
 
     @Override
     public void testInsertArray()
     {
-        // Cassandra connector currently does not support create table
-        // TODO test inserts
-    }
-
-    @Override
-    public void testCreateTable()
-    {
-        // Cassandra connector currently does not support create table
-    }
-
-    @Override
-    public void testDelete()
-    {
-        // Cassandra connector currently does not support delete
+        // TODO
+        assertThatThrownBy(super::testInsertArray)
+                .hasMessage("unsupported type: array(double)");
+        throw new SkipException("Unsupported");
     }
 
     @Override
@@ -98,7 +131,7 @@ public class TestCassandraDistributedQueries
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
                 .row("totalprice", "double", "", "")
-                .row("orderdate", "varchar", "", "")
+                .row("orderdate", "date", "", "")
                 .row("orderpriority", "varchar", "", "")
                 .row("clerk", "varchar", "", "")
                 .row("shippriority", "integer", "", "")
@@ -109,27 +142,29 @@ public class TestCassandraDistributedQueries
     }
 
     @Override
-    public void testDescribeOutput()
+    protected TestTable createTableWithDefaultColumns()
     {
-        // this connector uses a non-canonical type for varchar columns in tpch
+        throw new SkipException("Cassandra connector does not support column default values");
     }
 
     @Override
-    public void testDescribeOutputNamedAndUnnamed()
+    protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
-        // this connector uses a non-canonical type for varchar columns in tpch
+        String typeName = dataMappingTestSetup.getPrestoTypeName();
+        if (typeName.equals("time")
+                || typeName.equals("timestamp")
+                || typeName.equals("decimal(5,3)")
+                || typeName.equals("decimal(15,3)")
+                || typeName.equals("char(3)")) {
+            // TODO this should either work or fail cleanly
+            return Optional.empty();
+        }
+        return Optional.of(dataMappingTestSetup);
     }
 
     @Override
-    public void testWrittenStats()
+    protected String dataMappingTableName(String prestoTypeName)
     {
-        // TODO Cassandra connector supports CTAS and inserts, but the test would fail
-    }
-
-    @Override
-    public void testCommentTable()
-    {
-        // Cassandra connector currently does not support comment on table
-        assertQueryFails("COMMENT ON TABLE orders IS 'hello'", "This connector does not support setting table comments");
+        return "presto_tmp_" + System.nanoTime();
     }
 }

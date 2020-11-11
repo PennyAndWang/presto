@@ -13,10 +13,12 @@
  */
 package io.prestosql.plugin.hive.orc;
 
-import io.airlift.units.DataSize;
+import io.airlift.slice.Slice;
 import io.prestosql.orc.AbstractOrcDataSource;
 import io.prestosql.orc.OrcDataSourceId;
+import io.prestosql.orc.OrcReaderOptions;
 import io.prestosql.plugin.hive.FileFormatDataSourceStats;
+import io.prestosql.plugin.hive.util.FSDataInputStreamTail;
 import io.prestosql.spi.PrestoException;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.hdfs.BlockMissingException;
@@ -38,14 +40,11 @@ public class HdfsOrcDataSource
     public HdfsOrcDataSource(
             OrcDataSourceId id,
             long size,
-            DataSize maxMergeDistance,
-            DataSize maxReadSize,
-            DataSize streamBufferSize,
-            boolean lazyReadSmallRanges,
+            OrcReaderOptions options,
             FSDataInputStream inputStream,
             FileFormatDataSourceStats stats)
     {
-        super(id, size, maxMergeDistance, maxReadSize, streamBufferSize, lazyReadSmallRanges);
+        super(id, size, options);
         this.inputStream = requireNonNull(inputStream, "inputStream is null");
         this.stats = requireNonNull(stats, "stats is null");
     }
@@ -55,6 +54,18 @@ public class HdfsOrcDataSource
             throws IOException
     {
         inputStream.close();
+    }
+
+    @Override
+    public Slice readTail(int length)
+            throws IOException
+    {
+        //  Handle potentially imprecise file lengths by reading the footer
+        long readStart = System.nanoTime();
+        FSDataInputStreamTail fileTail = FSDataInputStreamTail.readTail(getId().toString(), getEstimatedSize(), inputStream, length);
+        Slice tailSlice = fileTail.getTailSlice();
+        stats.readDataBytesPerSecond(tailSlice.length(), System.nanoTime() - readStart);
+        return tailSlice;
     }
 
     @Override

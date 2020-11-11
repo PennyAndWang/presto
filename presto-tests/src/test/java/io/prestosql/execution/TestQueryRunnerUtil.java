@@ -16,10 +16,13 @@ package io.prestosql.execution;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.prestosql.Session;
+import io.prestosql.dispatcher.DispatchManager;
 import io.prestosql.plugin.tpch.TpchPlugin;
 import io.prestosql.server.BasicQueryInfo;
+import io.prestosql.server.protocol.Slug;
 import io.prestosql.spi.QueryId;
-import io.prestosql.tests.DistributedQueryRunner;
+import io.prestosql.testing.DistributedQueryRunner;
+import io.prestosql.testing.TestingSessionContext;
 
 import java.util.Map;
 import java.util.Set;
@@ -35,14 +38,14 @@ public final class TestQueryRunnerUtil
 
     public static QueryId createQuery(DistributedQueryRunner queryRunner, Session session, String sql)
     {
-        QueryManager queryManager = queryRunner.getCoordinator().getQueryManager();
-        getFutureValue(queryManager.createQuery(session.getQueryId(), new TestingSessionContext(session), sql));
+        DispatchManager dispatchManager = queryRunner.getCoordinator().getDispatchManager();
+        getFutureValue(dispatchManager.createQuery(session.getQueryId(), Slug.createNew(), new TestingSessionContext(session), sql));
         return session.getQueryId();
     }
 
     public static void cancelQuery(DistributedQueryRunner queryRunner, QueryId queryId)
     {
-        queryRunner.getCoordinator().getQueryManager().cancelQuery(queryId);
+        queryRunner.getCoordinator().getDispatchManager().cancelQuery(queryId);
     }
 
     public static void waitForQueryState(DistributedQueryRunner queryRunner, QueryId queryId, QueryState expectedQueryState)
@@ -54,17 +57,17 @@ public final class TestQueryRunnerUtil
     public static void waitForQueryState(DistributedQueryRunner queryRunner, QueryId queryId, Set<QueryState> expectedQueryStates)
             throws InterruptedException
     {
-        QueryManager queryManager = queryRunner.getCoordinator().getQueryManager();
+        DispatchManager dispatchManager = queryRunner.getCoordinator().getDispatchManager();
         do {
             // Heartbeat all the running queries, so they don't die while we're waiting
-            for (BasicQueryInfo queryInfo : queryManager.getQueries()) {
+            for (BasicQueryInfo queryInfo : dispatchManager.getQueries()) {
                 if (queryInfo.getState() == RUNNING) {
-                    queryManager.recordHeartbeat(queryInfo.getQueryId());
+                    dispatchManager.getQueryInfo(queryInfo.getQueryId());
                 }
             }
-            MILLISECONDS.sleep(500);
+            MILLISECONDS.sleep(100);
         }
-        while (!expectedQueryStates.contains(queryManager.getQueryState(queryId)));
+        while (!expectedQueryStates.contains(dispatchManager.getQueryInfo(queryId).getState()));
     }
 
     public static DistributedQueryRunner createQueryRunner()

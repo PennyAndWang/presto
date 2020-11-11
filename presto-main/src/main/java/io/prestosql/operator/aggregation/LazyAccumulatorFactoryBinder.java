@@ -14,17 +14,18 @@
 package io.prestosql.operator.aggregation;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import io.airlift.bytecode.DynamicClassLoader;
 import io.prestosql.Session;
 import io.prestosql.operator.PagesIndex;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.gen.JoinCompiler;
+import io.prestosql.type.BlockTypeOperators;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 public class LazyAccumulatorFactoryBinder
         implements AccumulatorFactoryBinder
@@ -52,9 +53,10 @@ public class LazyAccumulatorFactoryBinder
             PagesIndex.Factory pagesIndexFactory,
             boolean distinct,
             JoinCompiler joinCompiler,
+            BlockTypeOperators blockTypeOperators,
             List<LambdaProvider> lambdaProviders,
             Session session)
     {
-        return binder.get().bind(argumentChannels, maskChannel, sourceTypes, orderByChannels, orderings, pagesIndexFactory, distinct, joinCompiler, lambdaProviders, session);
+        return binder.get().bind(argumentChannels, maskChannel, sourceTypes, orderByChannels, orderings, pagesIndexFactory, distinct, joinCompiler, blockTypeOperators, lambdaProviders, session);
     }
 }

@@ -14,12 +14,15 @@
 package io.prestosql.plugin.memory;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import io.airlift.slice.Slice;
 import io.prestosql.spi.HostAddress;
 import io.prestosql.spi.Node;
 import io.prestosql.spi.NodeManager;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.connector.CatalogSchemaName;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.connector.ConnectorInsertTableHandle;
@@ -33,10 +36,12 @@ import io.prestosql.spi.connector.ConnectorTableMetadata;
 import io.prestosql.spi.connector.ConnectorTableProperties;
 import io.prestosql.spi.connector.ConnectorViewDefinition;
 import io.prestosql.spi.connector.LimitApplicationResult;
+import io.prestosql.spi.connector.SampleType;
 import io.prestosql.spi.connector.SchemaNotFoundException;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.SchemaTablePrefix;
 import io.prestosql.spi.connector.ViewNotFoundException;
+import io.prestosql.spi.security.PrestoPrincipal;
 import io.prestosql.spi.statistics.ComputedStatistics;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -48,6 +53,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
@@ -55,13 +61,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.prestosql.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.prestosql.spi.StandardErrorCode.NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
+import static io.prestosql.spi.connector.SampleType.SYSTEM;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 
 @ThreadSafe
@@ -75,7 +80,7 @@ public class MemoryMetadata
     private final AtomicLong nextTableId = new AtomicLong();
     private final Map<SchemaTableName, Long> tableIds = new HashMap<>();
     private final Map<Long, TableInfo> tables = new HashMap<>();
-    private final Map<SchemaTableName, String> views = new HashMap<>();
+    private final Map<SchemaTableName, ConnectorViewDefinition> views = new HashMap<>();
 
     @Inject
     public MemoryMetadata(NodeManager nodeManager)
@@ -91,7 +96,7 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties)
+    public synchronized void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, PrestoPrincipal owner)
     {
         if (schemas.contains(schemaName)) {
             throw new PrestoException(ALREADY_EXISTS, format("Schema [%s] already exists", schemaName));
@@ -117,6 +122,18 @@ public class MemoryMetadata
     }
 
     @Override
+    public Optional<PrestoPrincipal> getSchemaOwner(ConnectorSession session, CatalogSchemaName schemaName)
+    {
+        return Optional.empty();
+    }
+
+    @Override
+    public Map<String, Object> getSchemaProperties(ConnectorSession session, CatalogSchemaName schemaName)
+    {
+        return ImmutableMap.of();
+    }
+
+    @Override
     public synchronized ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName schemaTableName)
     {
         Long id = tableIds.get(schemaTableName);
@@ -137,10 +154,18 @@ public class MemoryMetadata
     @Override
     public synchronized List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
-        return tables.values().stream()
-                .filter(table -> schemaName.map(table.getSchemaName()::equals).orElse(true))
+        ImmutableList.Builder<SchemaTableName> builder = ImmutableList.builder();
+
+        views.keySet().stream()
+                .filter(table -> schemaName.map(table.getSchemaName()::contentEquals).orElse(true))
+                .forEach(builder::add);
+
+        tables.values().stream()
+                .filter(table -> schemaName.map(table.getSchemaName()::contentEquals).orElse(true))
                 .map(TableInfo::getSchemaTableName)
-                .collect(toList());
+                .forEach(builder::add);
+
+        return builder.build();
     }
 
     @Override
@@ -207,11 +232,9 @@ public class MemoryMetadata
     {
         checkSchemaExists(tableMetadata.getTable().getSchemaName());
         checkTableNotExists(tableMetadata.getTable());
-        long nextId = nextTableId.getAndIncrement();
+        long tableId = nextTableId.getAndIncrement();
         Set<Node> nodes = nodeManager.getRequiredWorkerNodes();
         checkState(!nodes.isEmpty(), "No Memory nodes available");
-
-        long tableId = nextId;
 
         ImmutableList.Builder<ColumnInfo> columns = ImmutableList.builder();
         for (int i = 0; i < tableMetadata.getColumns().size(); i++) {
@@ -258,7 +281,7 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized MemoryInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public synchronized MemoryInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns)
     {
         MemoryTableHandle memoryTableHandle = (MemoryTableHandle) tableHandle;
         return new MemoryInsertTableHandle(memoryTableHandle.getId(), ImmutableSet.copyOf(tableIds.values()));
@@ -275,7 +298,7 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized void createView(ConnectorSession session, SchemaTableName viewName, String viewData, boolean replace)
+    public synchronized void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, boolean replace)
     {
         checkSchemaExists(viewName.getSchemaName());
         if (tableIds.containsKey(viewName)) {
@@ -283,11 +306,26 @@ public class MemoryMetadata
         }
 
         if (replace) {
-            views.put(viewName, viewData);
+            views.put(viewName, definition);
         }
-        else if (views.putIfAbsent(viewName, viewData) != null) {
+        else if (views.putIfAbsent(viewName, definition) != null) {
             throw new PrestoException(ALREADY_EXISTS, "View already exists: " + viewName);
         }
+    }
+
+    @Override
+    public synchronized void renameView(ConnectorSession session, SchemaTableName viewName, SchemaTableName newViewName)
+    {
+        checkSchemaExists(newViewName.getSchemaName());
+        if (tableIds.containsKey(newViewName)) {
+            throw new PrestoException(ALREADY_EXISTS, "Table already exists: " + newViewName);
+        }
+
+        if (views.containsKey(newViewName)) {
+            throw new PrestoException(ALREADY_EXISTS, "View already exists: " + newViewName);
+        }
+
+        views.put(newViewName, views.remove(viewName));
     }
 
     @Override
@@ -307,13 +345,16 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, SchemaTablePrefix prefix)
+    public synchronized Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
     {
-        return views.entrySet().stream()
-                .filter(entry -> prefix.matches(entry.getKey()))
-                .collect(toImmutableMap(
-                        Map.Entry::getKey,
-                        entry -> new ConnectorViewDefinition(entry.getKey(), Optional.empty(), entry.getValue())));
+        SchemaTablePrefix prefix = schemaName.map(SchemaTablePrefix::new).orElseGet(SchemaTablePrefix::new);
+        return ImmutableMap.copyOf(Maps.filterKeys(views, prefix::matches));
+    }
+
+    @Override
+    public synchronized Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
+    {
+        return Optional.ofNullable(views.get(viewName));
     }
 
     private void updateRowsOnHosts(long tableId, Collection<Slice> fragments)
@@ -361,7 +402,19 @@ public class MemoryMetadata
         }
 
         return Optional.of(new LimitApplicationResult<>(
-                new MemoryTableHandle(table.getId(), OptionalLong.of(limit)),
+                new MemoryTableHandle(table.getId(), OptionalLong.of(limit), OptionalDouble.empty()),
                 true));
+    }
+
+    @Override
+    public Optional<ConnectorTableHandle> applySample(ConnectorSession session, ConnectorTableHandle handle, SampleType sampleType, double sampleRatio)
+    {
+        MemoryTableHandle table = (MemoryTableHandle) handle;
+
+        if ((table.getSampleRatio().isPresent() && table.getSampleRatio().getAsDouble() == sampleRatio) || sampleType != SYSTEM || table.getLimit().isPresent()) {
+            return Optional.empty();
+        }
+
+        return Optional.of(new MemoryTableHandle(table.getId(), table.getLimit(), OptionalDouble.of(table.getSampleRatio().orElse(1) * sampleRatio)));
     }
 }

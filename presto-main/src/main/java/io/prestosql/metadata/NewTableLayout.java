@@ -35,11 +35,11 @@ public class NewTableLayout
 
     @JsonCreator
     public NewTableLayout(
-            @JsonProperty("connectorId") CatalogName catalogName,
+            @JsonProperty("catalogName") CatalogName catalogName,
             @JsonProperty("transactionHandle") ConnectorTransactionHandle transactionHandle,
             @JsonProperty("layout") ConnectorNewTableLayout layout)
     {
-        this.catalogName = requireNonNull(catalogName, "connectorId is null");
+        this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.transactionHandle = requireNonNull(transactionHandle, "transactionHandle is null");
         this.layout = requireNonNull(layout, "layout is null");
     }
@@ -56,9 +56,10 @@ public class NewTableLayout
         return layout;
     }
 
-    public PartitioningHandle getPartitioning()
+    public Optional<PartitioningHandle> getPartitioning()
     {
-        return new PartitioningHandle(Optional.of(catalogName), Optional.of(transactionHandle), layout.getPartitioning());
+        return layout.getPartitioning()
+                .map(partitioning -> new PartitioningHandle(Optional.of(catalogName), Optional.of(transactionHandle), partitioning));
     }
 
     public List<String> getPartitionColumns()
@@ -92,7 +93,7 @@ public class NewTableLayout
     public String toString()
     {
         return toStringHelper(this)
-                .add("connectorId", catalogName)
+                .add("catalogName", catalogName)
                 .add("transactionHandle", transactionHandle)
                 .add("layout", layout)
                 .toString();

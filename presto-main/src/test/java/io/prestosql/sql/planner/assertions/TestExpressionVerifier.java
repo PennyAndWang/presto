@@ -13,12 +13,14 @@
  */
 package io.prestosql.sql.planner.assertions;
 
+import io.prestosql.sql.parser.ParsingOptions;
 import io.prestosql.sql.parser.SqlParser;
 import io.prestosql.sql.tree.Expression;
 import io.prestosql.sql.tree.SymbolReference;
 import org.testng.annotations.Test;
 
 import static io.prestosql.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -39,7 +41,9 @@ public class TestExpressionVerifier
         ExpressionVerifier verifier = new ExpressionVerifier(symbolAliases);
 
         assertTrue(verifier.process(actual, expression("NOT(X = 3 AND Y = 3 AND X < 10)")));
-        assertThrows(() -> verifier.process(actual, expression("NOT(X = 3 AND Y = 3 AND Z < 10)")));
+        assertThatThrownBy(() -> verifier.process(actual, expression("NOT(X = 3 AND Y = 3 AND Z < 10)")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("missing expression for alias Z");
         assertFalse(verifier.process(actual, expression("NOT(X = 3 AND X = 3 AND X < 10)")));
     }
 
@@ -76,18 +80,53 @@ public class TestExpressionVerifier
         assertFalse(verifier.process(expression("orderkey BETWEEN 1 AND 2"), expression("X BETWEEN 4 AND 7")));
     }
 
-    private Expression expression(String sql)
+    @Test
+    public void testSymmetry()
     {
-        return rewriteIdentifiersToSymbolReferences(parser.createExpression(sql));
+        SymbolAliases symbolAliases = SymbolAliases.builder()
+                .put("a", new SymbolReference("x"))
+                .put("b", new SymbolReference("y"))
+                .build();
+
+        ExpressionVerifier verifier = new ExpressionVerifier(symbolAliases);
+
+        assertTrue(verifier.process(expression("x > y"), expression("a > b")));
+        assertTrue(verifier.process(expression("x > y"), expression("b < a")));
+        assertTrue(verifier.process(expression("y < x"), expression("a > b")));
+        assertTrue(verifier.process(expression("y < x"), expression("b < a")));
+
+        assertFalse(verifier.process(expression("x < y"), expression("a > b")));
+        assertFalse(verifier.process(expression("x < y"), expression("b < a")));
+        assertFalse(verifier.process(expression("y > x"), expression("a > b")));
+        assertFalse(verifier.process(expression("y > x"), expression("b < a")));
+
+        assertTrue(verifier.process(expression("x >= y"), expression("a >= b")));
+        assertTrue(verifier.process(expression("x >= y"), expression("b <= a")));
+        assertTrue(verifier.process(expression("y <= x"), expression("a >= b")));
+        assertTrue(verifier.process(expression("y <= x"), expression("b <= a")));
+
+        assertFalse(verifier.process(expression("x <= y"), expression("a >= b")));
+        assertFalse(verifier.process(expression("x <= y"), expression("b <= a")));
+        assertFalse(verifier.process(expression("y >= x"), expression("a >= b")));
+        assertFalse(verifier.process(expression("y >= x"), expression("b <= a")));
+
+        assertTrue(verifier.process(expression("x = y"), expression("a = b")));
+        assertTrue(verifier.process(expression("x = y"), expression("b = a")));
+        assertTrue(verifier.process(expression("y = x"), expression("a = b")));
+        assertTrue(verifier.process(expression("y = x"), expression("b = a")));
+        assertTrue(verifier.process(expression("x <> y"), expression("a <> b")));
+        assertTrue(verifier.process(expression("x <> y"), expression("b <> a")));
+        assertTrue(verifier.process(expression("y <> x"), expression("a <> b")));
+        assertTrue(verifier.process(expression("y <> x"), expression("b <> a")));
+
+        assertTrue(verifier.process(expression("x IS DISTINCT FROM y"), expression("a IS DISTINCT FROM b")));
+        assertTrue(verifier.process(expression("x IS DISTINCT FROM y"), expression("b IS DISTINCT FROM a")));
+        assertTrue(verifier.process(expression("y IS DISTINCT FROM x"), expression("a IS DISTINCT FROM b")));
+        assertTrue(verifier.process(expression("y IS DISTINCT FROM x"), expression("b IS DISTINCT FROM a")));
     }
 
-    private static void assertThrows(Runnable runnable)
+    private Expression expression(String sql)
     {
-        try {
-            runnable.run();
-            throw new AssertionError("Method didn't throw exception as expected");
-        }
-        catch (Exception expected) {
-        }
+        return rewriteIdentifiersToSymbolReferences(parser.createExpression(sql, new ParsingOptions()));
     }
 }

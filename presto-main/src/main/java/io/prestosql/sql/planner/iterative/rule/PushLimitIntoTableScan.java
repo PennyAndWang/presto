@@ -13,6 +13,7 @@
  */
 package io.prestosql.sql.planner.iterative.rule;
 
+import io.prestosql.Session;
 import io.prestosql.matching.Capture;
 import io.prestosql.matching.Captures;
 import io.prestosql.matching.Pattern;
@@ -22,6 +23,7 @@ import io.prestosql.sql.planner.plan.LimitNode;
 import io.prestosql.sql.planner.plan.PlanNode;
 import io.prestosql.sql.planner.plan.TableScanNode;
 
+import static io.prestosql.SystemSessionProperties.isAllowPushdownIntoConnectors;
 import static io.prestosql.matching.Capture.newCapture;
 import static io.prestosql.sql.planner.plan.Patterns.limit;
 import static io.prestosql.sql.planner.plan.Patterns.source;
@@ -31,8 +33,10 @@ public class PushLimitIntoTableScan
         implements Rule<LimitNode>
 {
     private static final Capture<TableScanNode> TABLE_SCAN = newCapture();
-    private static final Pattern<LimitNode> PATTERN = limit().with(source().matching(
-            tableScan().capturedAs(TABLE_SCAN)));
+    private static final Pattern<LimitNode> PATTERN = limit()
+            .matching(limit -> !limit.isWithTies())
+            .with(source().matching(
+                    tableScan().capturedAs(TABLE_SCAN)));
 
     private final Metadata metadata;
 
@@ -48,6 +52,12 @@ public class PushLimitIntoTableScan
     }
 
     @Override
+    public boolean isEnabled(Session session)
+    {
+        return isAllowPushdownIntoConnectors(session);
+    }
+
+    @Override
     public Rule.Result apply(LimitNode limit, Captures captures, Rule.Context context)
     {
         TableScanNode tableScan = captures.get(TABLE_SCAN);
@@ -59,7 +69,8 @@ public class PushLimitIntoTableScan
                             result.getHandle(),
                             tableScan.getOutputSymbols(),
                             tableScan.getAssignments(),
-                            tableScan.getEnforcedConstraint());
+                            tableScan.getEnforcedConstraint(),
+                            tableScan.isForDelete());
 
                     if (!result.isLimitGuaranteed()) {
                         node = new LimitNode(limit.getId(), node, limit.getCount(), limit.isPartial());

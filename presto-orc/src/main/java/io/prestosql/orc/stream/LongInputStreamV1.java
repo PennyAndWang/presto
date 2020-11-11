@@ -19,7 +19,7 @@ import io.prestosql.orc.checkpoint.LongStreamV1Checkpoint;
 
 import java.io.IOException;
 
-import static com.google.common.primitives.Ints.min;
+import static java.lang.Math.min;
 
 public class LongInputStreamV1
         implements LongInputStream
@@ -201,12 +201,6 @@ public class LongInputStreamV1
     }
 
     @Override
-    public Class<? extends LongStreamV1Checkpoint> getCheckpointType()
-    {
-        return LongStreamV1Checkpoint.class;
-    }
-
-    @Override
     public void seekToCheckpoint(LongStreamCheckpoint checkpoint)
             throws IOException
     {
@@ -233,7 +227,7 @@ public class LongInputStreamV1
             if (used == numLiterals) {
                 readValues();
             }
-            long consume = Math.min(items, numLiterals - used);
+            long consume = min(items, numLiterals - used);
             used += consume;
             items -= consume;
         }

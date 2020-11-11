@@ -19,8 +19,9 @@ import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplit;
 import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
+import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedSplitSource;
 import redis.clients.jedis.Jedis;
 
@@ -31,7 +32,6 @@ import java.util.Collections;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkState;
-import static io.prestosql.plugin.redis.RedisHandleResolver.convertLayout;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -56,9 +56,14 @@ public class RedisSplitManager
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableLayoutHandle layout, SplitSchedulingStrategy splitSchedulingStrategy)
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            SplitSchedulingStrategy splitSchedulingStrategy,
+            DynamicFilter dynamicFilter)
     {
-        RedisTableHandle redisTableHandle = convertLayout(layout).getTable();
+        RedisTableHandle redisTableHandle = (RedisTableHandle) table;
 
         List<HostAddress> nodes = new ArrayList<>(redisConnectorConfig.getNodes());
         Collections.shuffle(nodes);

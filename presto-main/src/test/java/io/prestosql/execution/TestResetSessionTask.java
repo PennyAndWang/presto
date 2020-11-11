@@ -16,16 +16,10 @@ package io.prestosql.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.prestosql.Session;
-import io.prestosql.block.BlockEncodingManager;
 import io.prestosql.execution.warnings.WarningCollector;
-import io.prestosql.metadata.AnalyzePropertyManager;
 import io.prestosql.metadata.Catalog;
 import io.prestosql.metadata.CatalogManager;
-import io.prestosql.metadata.ColumnPropertyManager;
-import io.prestosql.metadata.MetadataManager;
-import io.prestosql.metadata.SchemaPropertyManager;
-import io.prestosql.metadata.SessionPropertyManager;
-import io.prestosql.metadata.TablePropertyManager;
+import io.prestosql.metadata.Metadata;
 import io.prestosql.security.AccessControl;
 import io.prestosql.security.AllowAllAccessControl;
 import io.prestosql.spi.resourcegroups.ResourceGroupId;
@@ -33,16 +27,17 @@ import io.prestosql.sql.analyzer.FeaturesConfig;
 import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.sql.tree.ResetSession;
 import io.prestosql.transaction.TransactionManager;
-import io.prestosql.type.TypeRegistry;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
 import java.net.URI;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.spi.session.PropertyMetadata.stringProperty;
 import static io.prestosql.testing.TestingSession.createBogusTestingCatalog;
 import static io.prestosql.testing.TestingSession.testSessionBuilder;
@@ -54,10 +49,10 @@ import static org.testng.Assert.assertEquals;
 public class TestResetSessionTask
 {
     private static final String CATALOG_NAME = "catalog";
-    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed("stage-executor-%s"));
+    private ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
     private final TransactionManager transactionManager;
     private final AccessControl accessControl;
-    private final MetadataManager metadata;
+    private final Metadata metadata;
 
     public TestResetSessionTask()
     {
@@ -65,16 +60,7 @@ public class TestResetSessionTask
         transactionManager = createTestTransactionManager(catalogManager);
         accessControl = new AllowAllAccessControl();
 
-        metadata = new MetadataManager(
-                new FeaturesConfig(),
-                new TypeRegistry(),
-                new BlockEncodingManager(new TypeRegistry()),
-                new SessionPropertyManager(),
-                new SchemaPropertyManager(),
-                new TablePropertyManager(),
-                new ColumnPropertyManager(),
-                new AnalyzePropertyManager(),
-                transactionManager);
+        metadata = createTestMetadataManager(transactionManager, new FeaturesConfig());
 
         metadata.getSessionPropertyManager().addSystemSessionProperty(stringProperty(
                 "foo",
@@ -95,6 +81,7 @@ public class TestResetSessionTask
     public void tearDown()
     {
         executor.shutdownNow();
+        executor = null;
     }
 
     @Test
@@ -107,6 +94,7 @@ public class TestResetSessionTask
 
         QueryStateMachine stateMachine = QueryStateMachine.begin(
                 "reset foo",
+                Optional.empty(),
                 session,
                 URI.create("fake://uri"),
                 new ResourceGroupId("test"),
@@ -115,7 +103,8 @@ public class TestResetSessionTask
                 accessControl,
                 executor,
                 metadata,
-                WarningCollector.NOOP);
+                WarningCollector.NOOP,
+                Optional.empty());
 
         getFutureValue(new ResetSessionTask().execute(
                 new ResetSession(QualifiedName.of(CATALOG_NAME, "baz")),

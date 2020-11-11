@@ -26,30 +26,30 @@ public class Grant
         extends Statement
 {
     private final Optional<List<String>> privileges; // missing means ALL PRIVILEGES
-    private final boolean table;
-    private final QualifiedName tableName;
+    private final Optional<GrantOnType> type;
+    private final QualifiedName name;
     private final PrincipalSpecification grantee;
-    private final boolean withGrantOption;
+    private final boolean grantOption;
 
-    public Grant(Optional<List<String>> privileges, boolean table, QualifiedName tableName, PrincipalSpecification grantee, boolean withGrantOption)
+    public Grant(Optional<List<String>> privileges, Optional<GrantOnType> type, QualifiedName name, PrincipalSpecification grantee, boolean grantOption)
     {
-        this(Optional.empty(), privileges, table, tableName, grantee, withGrantOption);
+        this(Optional.empty(), privileges, type, name, grantee, grantOption);
     }
 
-    public Grant(NodeLocation location, Optional<List<String>> privileges, boolean table, QualifiedName tableName, PrincipalSpecification grantee, boolean withGrantOption)
+    public Grant(NodeLocation location, Optional<List<String>> privileges, Optional<GrantOnType> type, QualifiedName name, PrincipalSpecification grantee, boolean grantOption)
     {
-        this(Optional.of(location), privileges, table, tableName, grantee, withGrantOption);
+        this(Optional.of(location), privileges, type, name, grantee, grantOption);
     }
 
-    private Grant(Optional<NodeLocation> location, Optional<List<String>> privileges, boolean table, QualifiedName tableName, PrincipalSpecification grantee, boolean withGrantOption)
+    private Grant(Optional<NodeLocation> location, Optional<List<String>> privileges, Optional<GrantOnType> type, QualifiedName name, PrincipalSpecification grantee, boolean grantOption)
     {
         super(location);
         requireNonNull(privileges, "privileges is null");
         this.privileges = privileges.map(ImmutableList::copyOf);
-        this.table = table;
-        this.tableName = requireNonNull(tableName, "tableName is null");
+        this.type = requireNonNull(type, "type is null");
+        this.name = requireNonNull(name, "name is null");
         this.grantee = requireNonNull(grantee, "grantee is null");
-        this.withGrantOption = withGrantOption;
+        this.grantOption = grantOption;
     }
 
     public Optional<List<String>> getPrivileges()
@@ -57,14 +57,14 @@ public class Grant
         return privileges;
     }
 
-    public boolean isTable()
+    public Optional<GrantOnType> getType()
     {
-        return table;
+        return type;
     }
 
-    public QualifiedName getTableName()
+    public QualifiedName getName()
     {
-        return tableName;
+        return name;
     }
 
     public PrincipalSpecification getGrantee()
@@ -74,7 +74,7 @@ public class Grant
 
     public boolean isWithGrantOption()
     {
-        return withGrantOption;
+        return grantOption;
     }
 
     @Override
@@ -92,7 +92,7 @@ public class Grant
     @Override
     public int hashCode()
     {
-        return Objects.hash(privileges, table, tableName, grantee, withGrantOption);
+        return Objects.hash(privileges, type, name, grantee, grantOption);
     }
 
     @Override
@@ -106,10 +106,10 @@ public class Grant
         }
         Grant o = (Grant) obj;
         return Objects.equals(privileges, o.privileges) &&
-                Objects.equals(table, o.table) &&
-                Objects.equals(tableName, o.tableName) &&
+                Objects.equals(type, o.type) &&
+                Objects.equals(name, o.name) &&
                 Objects.equals(grantee, o.grantee) &&
-                Objects.equals(withGrantOption, o.withGrantOption);
+                Objects.equals(grantOption, o.grantOption);
     }
 
     @Override
@@ -117,10 +117,10 @@ public class Grant
     {
         return toStringHelper(this)
                 .add("privileges", privileges)
-                .add("table", table)
-                .add("tableName", tableName)
+                .add("type", type)
+                .add("name", name)
                 .add("grantee", grantee)
-                .add("withGrantOption", withGrantOption)
+                .add("grantOption", grantOption)
                 .toString();
     }
 }

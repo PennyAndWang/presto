@@ -107,7 +107,7 @@ public class RemoteNodeMemory
             HttpResponseFuture<JsonResponse<MemoryInfo>> responseFuture = httpClient.executeAsync(request, createFullJsonResponseHandler(memoryInfoCodec));
             future.compareAndSet(null, responseFuture);
 
-            Futures.addCallback(responseFuture, new FutureCallback<JsonResponse<MemoryInfo>>()
+            Futures.addCallback(responseFuture, new FutureCallback<>()
             {
                 @Override
                 public void onSuccess(@Nullable JsonResponse<MemoryInfo> result)
@@ -120,7 +120,7 @@ public class RemoteNodeMemory
                             memoryInfo.set(Optional.ofNullable(result.getValue()));
                         }
                         if (result.getStatusCode() != OK.code()) {
-                            log.warn("Error fetching memory info from %s returned status %d: %s", memoryInfoUri, result.getStatusCode(), result.getStatusMessage());
+                            log.warn("Error fetching memory info from %s returned status %d", memoryInfoUri, result.getStatusCode());
                             return;
                         }
                     }

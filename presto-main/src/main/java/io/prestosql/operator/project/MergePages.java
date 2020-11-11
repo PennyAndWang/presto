@@ -20,6 +20,7 @@ import io.prestosql.operator.WorkProcessor;
 import io.prestosql.operator.WorkProcessor.TransformationState;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PageBuilder;
+import io.prestosql.spi.block.Block;
 import io.prestosql.spi.type.Type;
 
 import java.util.List;
@@ -50,7 +51,7 @@ import static java.util.Objects.requireNonNull;
  * Considering the CPU time required to process(filter, project) a full (~1MB) page returned by a
  * connector, the CPU cost of memory copying (< 50kb, < 1024 rows) is supposed to be negligible.
  */
-public class MergePages
+public final class MergePages
 {
     private static final int MAX_MIN_PAGE_SIZE = 1024 * 1024;
 
@@ -127,7 +128,8 @@ public class MergePages
                 return ofResult(flush(), false);
             }
 
-            if (inputPage.getPositionCount() >= minRowCount || inputPage.getSizeInBytes() >= minPageSizeInBytes) {
+            // TODO: merge low cardinality blocks lazily
+            if (inputPage.getPositionCount() >= minRowCount || !isLoaded(inputPage) || inputPage.getSizeInBytes() >= minPageSizeInBytes) {
                 if (pageBuilder.isEmpty()) {
                     return ofResult(inputPage);
                 }
@@ -167,6 +169,19 @@ public class MergePages
             pageBuilder.reset();
             memoryContext.setBytes(pageBuilder.getRetainedSizeInBytes());
             return output;
+        }
+
+        private static boolean isLoaded(Page page)
+        {
+            // TODO: provide better heuristics there, e.g check if last produced page was materialized
+            for (int channel = 0; channel < page.getChannelCount(); ++channel) {
+                Block block = page.getBlock(channel);
+                if (!block.isLoaded()) {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

@@ -82,7 +82,7 @@ public final class DiscoveryNodeManager
     private final InternalNode currentNode;
 
     @GuardedBy("this")
-    private SetMultimap<CatalogName, InternalNode> activeNodesByConnectorId;
+    private SetMultimap<CatalogName, InternalNode> activeNodesByCatalogName;
 
     @GuardedBy("this")
     private AllNodes allNodes;
@@ -198,8 +198,7 @@ public final class DiscoveryNodeManager
 
     private synchronized void refreshNodesInternal()
     {
-        // This is currently a blacklist.
-        // TODO: make it a whitelist (a failure-detecting service selector) and maybe build in support for injecting this in airlift
+        // This is a deny-list.
         Set<ServiceDescriptor> services = serviceSelector.selectAllServices().stream()
                 .filter(service -> !failureDetector.getFailed().contains(service))
                 .collect(toImmutableSet());
@@ -258,7 +257,7 @@ public final class DiscoveryNodeManager
         }
 
         // nodes by connector id changes anytime a node adds or removes a connector (note: this is not part of the listener system)
-        activeNodesByConnectorId = byConnectorIdBuilder.build();
+        activeNodesByCatalogName = byConnectorIdBuilder.build();
 
         AllNodes allNodes = new AllNodes(activeNodesBuilder.build(), inactiveNodesBuilder.build(), shuttingDownNodesBuilder.build(), coordinatorsBuilder.build());
         // only update if all nodes actually changed (note: this does not include the connectors registered with the nodes)
@@ -338,7 +337,7 @@ public final class DiscoveryNodeManager
     @Override
     public synchronized Set<InternalNode> getActiveConnectorNodes(CatalogName catalogName)
     {
-        return activeNodesByConnectorId.get(catalogName);
+        return activeNodesByCatalogName.get(catalogName);
     }
 
     @Override

@@ -35,7 +35,6 @@ import java.util.Set;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.prestosql.operator.StageExecutionDescriptor.groupedExecution;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -54,6 +53,36 @@ public class PlanFragment
     private final StageExecutionDescriptor stageExecutionDescriptor;
     private final StatsAndCosts statsAndCosts;
     private final Optional<String> jsonRepresentation;
+
+    // Only for creating instances without the JSON representation embedded
+    private PlanFragment(
+            PlanFragmentId id,
+            PlanNode root,
+            Map<Symbol, Type> symbols,
+            PartitioningHandle partitioning,
+            List<PlanNodeId> partitionedSources,
+            Set<PlanNodeId> partitionedSourcesSet,
+            List<Type> types,
+            Set<PlanNode> partitionedSourceNodes,
+            List<RemoteSourceNode> remoteSourceNodes,
+            PartitioningScheme partitioningScheme,
+            StageExecutionDescriptor stageExecutionDescriptor,
+            StatsAndCosts statsAndCosts)
+    {
+        this.id = requireNonNull(id, "id is null");
+        this.root = requireNonNull(root, "root is null");
+        this.symbols = requireNonNull(symbols, "symbols is null");
+        this.partitioning = requireNonNull(partitioning, "partitioning is null");
+        this.partitionedSources = requireNonNull(partitionedSources, "partitionedSources is null");
+        this.partitionedSourcesSet = requireNonNull(partitionedSourcesSet, "partitionedSourcesSet is null");
+        this.types = requireNonNull(types, "types is null");
+        this.partitionedSourceNodes = requireNonNull(partitionedSourceNodes, "partitionedSourceNodes is null");
+        this.remoteSourceNodes = requireNonNull(remoteSourceNodes, "remoteSourceNodes is null");
+        this.partitioningScheme = requireNonNull(partitioningScheme, "partitioningScheme is null");
+        this.stageExecutionDescriptor = requireNonNull(stageExecutionDescriptor, "stageExecutionDescriptor is null");
+        this.statsAndCosts = requireNonNull(statsAndCosts, "statsAndCosts is null");
+        this.jsonRepresentation = Optional.empty();
+    }
 
     @JsonCreator
     public PlanFragment(
@@ -155,6 +184,26 @@ public class PlanFragment
         return jsonRepresentation;
     }
 
+    public PlanFragment withoutEmbeddedJsonRepresentation()
+    {
+        if (!jsonRepresentation.isPresent()) {
+            return this;
+        }
+        return new PlanFragment(
+                this.id,
+                this.root,
+                this.symbols,
+                this.partitioning,
+                this.partitionedSources,
+                this.partitionedSourcesSet,
+                this.types,
+                this.partitionedSourceNodes,
+                this.remoteSourceNodes,
+                this.partitioningScheme,
+                this.stageExecutionDescriptor,
+                this.statsAndCosts);
+    }
+
     public List<Type> getTypes()
     {
         return types;
@@ -209,9 +258,14 @@ public class PlanFragment
         return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme.withBucketToPartition(bucketToPartition), stageExecutionDescriptor, statsAndCosts, jsonRepresentation);
     }
 
-    public PlanFragment withGroupedExecution(List<PlanNodeId> capableTableScanNodes)
+    public PlanFragment withFixedLifespanScheduleGroupedExecution(List<PlanNodeId> capableTableScanNodes)
     {
-        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme, groupedExecution(capableTableScanNodes), statsAndCosts, jsonRepresentation);
+        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme, StageExecutionDescriptor.fixedLifespanScheduleGroupedExecution(capableTableScanNodes), statsAndCosts, jsonRepresentation);
+    }
+
+    public PlanFragment withDynamicLifespanScheduleGroupedExecution(List<PlanNodeId> capableTableScanNodes)
+    {
+        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme, StageExecutionDescriptor.dynamicLifespanScheduleGroupedExecution(capableTableScanNodes), statsAndCosts, jsonRepresentation);
     }
 
     @Override

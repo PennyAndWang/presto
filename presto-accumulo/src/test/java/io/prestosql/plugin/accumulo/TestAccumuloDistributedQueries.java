@@ -15,10 +15,15 @@ package io.prestosql.plugin.accumulo;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.prestosql.testing.AbstractTestDistributedQueries;
 import io.prestosql.testing.MaterializedResult;
-import io.prestosql.tests.AbstractTestDistributedQueries;
+import io.prestosql.testing.QueryRunner;
+import io.prestosql.testing.sql.TestTable;
 import org.intellij.lang.annotations.Language;
+import org.testng.SkipException;
 import org.testng.annotations.Test;
+
+import java.util.Optional;
 
 import static io.prestosql.plugin.accumulo.AccumuloQueryRunner.createAccumuloQueryRunner;
 import static org.testng.Assert.assertEquals;
@@ -37,9 +42,41 @@ import static org.testng.Assert.assertTrue;
 public class TestAccumuloDistributedQueries
         extends AbstractTestDistributedQueries
 {
-    public TestAccumuloDistributedQueries()
+    @Override
+    protected QueryRunner createQueryRunner()
+            throws Exception
     {
-        super(() -> createAccumuloQueryRunner(ImmutableMap.of()));
+        return createAccumuloQueryRunner(ImmutableMap.of());
+    }
+
+    @Override
+    protected boolean supportsDelete()
+    {
+        return false;
+    }
+
+    @Override
+    protected boolean supportsCommentOnTable()
+    {
+        return false;
+    }
+
+    @Override
+    protected boolean supportsCommentOnColumn()
+    {
+        return false;
+    }
+
+    @Override
+    protected TestTable createTableWithDefaultColumns()
+    {
+        throw new SkipException("Accumulo connector does not support column default values");
+    }
+
+    @Override
+    public void testCreateSchema()
+    {
+        // schema creation is not supported
     }
 
     @Override
@@ -66,7 +103,7 @@ public class TestAccumuloDistributedQueries
         assertTrue(getQueryRunner().tableExists(getSession(), "test_create_table_as_if_not_exists"));
         assertTableColumnNames("test_create_table_as_if_not_exists", "a", "b");
 
-        assertUpdate("CREATE TABLE IF NOT EXISTS test_create_table_as_if_not_exists AS SELECT UUID() AS uuid, orderkey, discount FROM lineitem", 0);
+        assertUpdate("CREATE TABLE IF NOT EXISTS test_create_table_as_if_not_exists AS SELECT cast(uuid() AS uuid) AS uuid, orderkey, discount FROM lineitem", 0);
         assertTrue(getQueryRunner().tableExists(getSession(), "test_create_table_as_if_not_exists"));
         assertTableColumnNames("test_create_table_as_if_not_exists", "a", "b");
 
@@ -74,33 +111,24 @@ public class TestAccumuloDistributedQueries
         assertFalse(getQueryRunner().tableExists(getSession(), "test_create_table_as_if_not_exists"));
 
         this.assertCreateTableAsSelect(
-                "test_group",
                 "SELECT orderstatus, sum(totalprice) x FROM orders GROUP BY orderstatus",
                 "SELECT count(DISTINCT orderstatus) FROM orders");
 
         this.assertCreateTableAsSelect(
-                "test_with_data",
                 "SELECT * FROM orders WITH DATA",
                 "SELECT * FROM orders",
                 "SELECT count(*) FROM orders");
 
         this.assertCreateTableAsSelect(
-                "test_with_no_data",
                 "SELECT * FROM orders WITH NO DATA",
                 "SELECT * FROM orders LIMIT 0",
                 "SELECT 0");
     }
 
     @Override
-    public void testDelete()
-    {
-        // Deletes are not supported by the connector
-    }
-
-    @Override
     public void testInsert()
     {
-        @Language("SQL") String query = "SELECT UUID() AS uuid, orderdate, orderkey FROM orders";
+        @Language("SQL") String query = "SELECT cast(uuid() AS varchar) AS uuid, orderdate, orderkey FROM orders";
 
         assertUpdate("CREATE TABLE test_insert AS " + query + " WITH NO DATA", 0);
         assertQuery("SELECT count(*) FROM test_insert", "SELECT 0");
@@ -125,12 +153,18 @@ public class TestAccumuloDistributedQueries
         // of how they are declared in the table schema
         assertUpdate(
                 "INSERT INTO test_insert (uuid, orderkey, orderdate) " +
-                        "SELECT UUID() AS uuid, orderkey, orderdate FROM orders " +
+                        "SELECT cast(uuid() AS varchar) AS uuid, orderkey, orderdate FROM orders " +
                         "UNION ALL " +
-                        "SELECT UUID() AS uuid, orderkey, orderdate FROM orders",
+                        "SELECT cast(uuid() AS varchar) AS uuid, orderkey, orderdate FROM orders",
                 "SELECT 2 * count(*) FROM orders");
 
         assertUpdate("DROP TABLE test_insert");
+    }
+
+    @Override
+    public void testInsertWithCoercion()
+    {
+        // Override because of non-canonical varchar mapping
     }
 
     @Override // Overridden because we currently do not support arrays with null elements
@@ -139,10 +173,9 @@ public class TestAccumuloDistributedQueries
         assertUpdate("CREATE TABLE test_insert_array (a ARRAY<DOUBLE>, b ARRAY<BIGINT>)");
 
         // assertUpdate("INSERT INTO test_insert_array (a) VALUES (ARRAY[null])", 1); TODO support ARRAY with null elements
-        assertUpdate("INSERT INTO test_insert_array (a) VALUES (ARRAY[1234])", 1);
-        assertQuery("SELECT a[1] FROM test_insert_array", "VALUES (1234)");
 
-        assertQueryFails("INSERT INTO test_insert_array (b) VALUES (ARRAY[1.23E1])", "Insert query has mismatched column types: .*");
+        assertUpdate("INSERT INTO test_insert_array (a, b) VALUES (ARRAY[1.23E1], ARRAY[1.23E1])", 1);
+        assertQuery("SELECT a[1], b[1] FROM test_insert_array", "VALUES (12.3, 12)");
 
         assertUpdate("DROP TABLE test_insert_array");
     }
@@ -319,21 +352,15 @@ public class TestAccumuloDistributedQueries
     }
 
     @Override
-    public void testDescribeOutput()
+    protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
-        // this connector uses a non-canonical type for varchar columns in tpch
-    }
+        String typeName = dataMappingTestSetup.getPrestoTypeName();
+        if (typeName.startsWith("decimal(")
+                || typeName.equals("timestamp(3) with time zone")
+                || typeName.startsWith("char(")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
+        }
 
-    @Override
-    public void testDescribeOutputNamedAndUnnamed()
-    {
-        // this connector uses a non-canonical type for varchar columns in tpch
-    }
-
-    @Override
-    public void testCommentTable()
-    {
-        // Accumulo connector currently does not support comment on table
-        assertQueryFails("COMMENT ON TABLE orders IS 'hello'", "This connector does not support setting table comments");
+        return Optional.of(dataMappingTestSetup);
     }
 }

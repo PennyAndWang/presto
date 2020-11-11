@@ -22,8 +22,7 @@ import io.airlift.units.DataSize.Unit;
 import io.prestosql.ExceededMemoryLimitException;
 import io.prestosql.RowPagesBuilder;
 import io.prestosql.memory.context.AggregatedMemoryContext;
-import io.prestosql.metadata.MetadataManager;
-import io.prestosql.metadata.Signature;
+import io.prestosql.metadata.Metadata;
 import io.prestosql.operator.HashAggregationOperator.HashAggregationOperatorFactory;
 import io.prestosql.operator.aggregation.InternalAggregationFunction;
 import io.prestosql.operator.aggregation.builder.HashAggregationBuilder;
@@ -31,15 +30,17 @@ import io.prestosql.operator.aggregation.builder.InMemoryHashAggregationBuilder;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.block.PageBuilderStatus;
-import io.prestosql.spi.type.StandardTypes;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.spiller.Spiller;
 import io.prestosql.spiller.SpillerFactory;
 import io.prestosql.sql.gen.JoinCompiler;
 import io.prestosql.sql.planner.plan.AggregationNode.Step;
 import io.prestosql.sql.planner.plan.PlanNodeId;
+import io.prestosql.sql.tree.QualifiedName;
 import io.prestosql.testing.MaterializedResult;
 import io.prestosql.testing.TestingTaskContext;
+import io.prestosql.type.BlockTypeOperators;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
@@ -66,7 +67,7 @@ import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.prestosql.RowPagesBuilder.rowPagesBuilder;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
-import static io.prestosql.metadata.FunctionKind.AGGREGATE;
+import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
 import static io.prestosql.operator.GroupByHashYieldAssertion.GroupByHashYieldResult;
 import static io.prestosql.operator.GroupByHashYieldAssertion.createPagesWithDistinctHashKeys;
 import static io.prestosql.operator.GroupByHashYieldAssertion.finishOperatorWithYieldingGroupByHash;
@@ -78,8 +79,8 @@ import static io.prestosql.operator.OperatorAssertion.toPages;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
-import static io.prestosql.spi.type.TypeSignature.parseTypeSignature;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
+import static io.prestosql.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.prestosql.testing.MaterializedResult.resultBuilder;
 import static io.prestosql.testing.TestingTaskContext.createTaskContext;
 import static java.lang.String.format;
@@ -94,28 +95,40 @@ import static org.testng.Assert.fail;
 @Test(singleThreaded = true)
 public class TestHashAggregationOperator
 {
-    private static final MetadataManager metadata = MetadataManager.createTestMetadataManager();
+    private static final Metadata metadata = createTestMetadataManager();
 
-    private static final InternalAggregationFunction LONG_AVERAGE = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-            new Signature("avg", AGGREGATE, DOUBLE.getTypeSignature(), BIGINT.getTypeSignature()));
-    private static final InternalAggregationFunction LONG_SUM = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-            new Signature("sum", AGGREGATE, BIGINT.getTypeSignature(), BIGINT.getTypeSignature()));
-    private static final InternalAggregationFunction COUNT = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-            new Signature("count", AGGREGATE, BIGINT.getTypeSignature()));
+    private static final InternalAggregationFunction LONG_AVERAGE = metadata.getAggregateFunctionImplementation(
+            metadata.resolveFunction(QualifiedName.of("avg"), fromTypes(BIGINT)));
+    private static final InternalAggregationFunction LONG_SUM = metadata.getAggregateFunctionImplementation(
+            metadata.resolveFunction(QualifiedName.of("sum"), fromTypes(BIGINT)));
+    private static final InternalAggregationFunction COUNT = metadata.getAggregateFunctionImplementation(
+            metadata.resolveFunction(QualifiedName.of("count"), ImmutableList.of()));
+    private static final InternalAggregationFunction LONG_MIN = metadata.getAggregateFunctionImplementation(
+            metadata.resolveFunction(QualifiedName.of("min"), fromTypes(BIGINT)));
 
     private static final int MAX_BLOCK_SIZE_IN_BYTES = 64 * 1024;
 
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
-    private JoinCompiler joinCompiler = new JoinCompiler(MetadataManager.createTestMetadataManager());
+    private final TypeOperators typeOperators = new TypeOperators();
+    private final BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
+    private final JoinCompiler joinCompiler = new JoinCompiler(typeOperators);
     private DummySpillerFactory spillerFactory;
 
     @BeforeMethod
     public void setUp()
     {
-        executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         spillerFactory = new DummySpillerFactory();
+    }
+
+    @AfterMethod(alwaysRun = true)
+    public void tearDown()
+    {
+        spillerFactory = null;
+        executor.shutdownNow();
+        scheduledExecutor.shutdownNow();
     }
 
     @DataProvider(name = "hashEnabled")
@@ -145,26 +158,18 @@ public class TestHashAggregationOperator
         return new Object[][] {{VARCHAR}, {BIGINT}};
     }
 
-    @AfterMethod(alwaysRun = true)
-    public void tearDown()
-    {
-        spillerFactory = null;
-        executor.shutdownNow();
-        scheduledExecutor.shutdownNow();
-    }
-
     @Test(dataProvider = "hashEnabledAndMemoryLimitForMergeValues")
     public void testHashAggregation(boolean hashEnabled, boolean spillEnabled, boolean revokeMemoryWhenAddingPages, long memoryLimitForMerge, long memoryLimitForMergeWithMemory)
     {
         // make operator produce multiple pages during finish phase
         int numberOfRows = 40_000;
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        InternalAggregationFunction countVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("count", AGGREGATE, parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.VARCHAR)));
-        InternalAggregationFunction countBooleanColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("count", AGGREGATE, parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.BOOLEAN)));
-        InternalAggregationFunction maxVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("max", AGGREGATE, parseTypeSignature(StandardTypes.VARCHAR), parseTypeSignature(StandardTypes.VARCHAR)));
+        Metadata metadata = createTestMetadataManager();
+        InternalAggregationFunction countVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("count"), fromTypes(VARCHAR)));
+        InternalAggregationFunction countBooleanColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("count"), fromTypes(BOOLEAN)));
+        InternalAggregationFunction maxVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("max"), fromTypes(VARCHAR)));
         List<Integer> hashChannels = Ints.asList(1);
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, hashChannels, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN);
         List<Page> input = rowPagesBuilder
@@ -190,12 +195,13 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 spillEnabled,
                 succinctBytes(memoryLimitForMerge),
                 succinctBytes(memoryLimitForMergeWithMemory),
                 spillerFactory,
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         DriverContext driverContext = createDriverContext(memoryLimitForMerge);
@@ -216,13 +222,13 @@ public class TestHashAggregationOperator
     @Test(dataProvider = "hashEnabledAndMemoryLimitForMergeValues")
     public void testHashAggregationWithGlobals(boolean hashEnabled, boolean spillEnabled, boolean revokeMemoryWhenAddingPages, long memoryLimitForMerge, long memoryLimitForMergeWithMemory)
     {
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        InternalAggregationFunction countVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("count", AGGREGATE, parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.VARCHAR)));
-        InternalAggregationFunction countBooleanColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("count", AGGREGATE, parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.BOOLEAN)));
-        InternalAggregationFunction maxVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("max", AGGREGATE, parseTypeSignature(StandardTypes.VARCHAR), parseTypeSignature(StandardTypes.VARCHAR)));
+        Metadata metadata = createTestMetadataManager();
+        InternalAggregationFunction countVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("count"), fromTypes(VARCHAR)));
+        InternalAggregationFunction countBooleanColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("count"), fromTypes(BOOLEAN)));
+        InternalAggregationFunction maxVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("max"), fromTypes(VARCHAR)));
 
         Optional<Integer> groupIdChannel = Optional.of(1);
         List<Integer> groupByChannels = Ints.asList(1, 2);
@@ -239,7 +245,7 @@ public class TestHashAggregationOperator
                 Step.SINGLE,
                 true,
                 ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty()),
-                        LONG_SUM.bind(ImmutableList.of(4), Optional.empty()),
+                        LONG_MIN.bind(ImmutableList.of(4), Optional.empty()),
                         LONG_AVERAGE.bind(ImmutableList.of(4), Optional.empty()),
                         maxVarcharColumn.bind(ImmutableList.of(2), Optional.empty()),
                         countVarcharColumn.bind(ImmutableList.of(0), Optional.empty()),
@@ -247,12 +253,13 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 groupIdChannel,
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 spillEnabled,
                 succinctBytes(memoryLimitForMerge),
                 succinctBytes(memoryLimitForMergeWithMemory),
                 spillerFactory,
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         DriverContext driverContext = createDriverContext(memoryLimitForMerge);
@@ -267,9 +274,9 @@ public class TestHashAggregationOperator
     @Test(dataProvider = "hashEnabledAndMemoryLimitForMergeValues")
     public void testHashAggregationMemoryReservation(boolean hashEnabled, boolean spillEnabled, boolean revokeMemoryWhenAddingPages, long memoryLimitForMerge, long memoryLimitForMergeWithMemory)
     {
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        InternalAggregationFunction arrayAggColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("array_agg", AGGREGATE, parseTypeSignature("array(bigint)"), parseTypeSignature(StandardTypes.BIGINT)));
+        Metadata metadata = createTestMetadataManager();
+        InternalAggregationFunction arrayAggColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("array_agg"), fromTypes(BIGINT)));
 
         List<Integer> hashChannels = Ints.asList(1);
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, hashChannels, BIGINT, BIGINT);
@@ -279,7 +286,7 @@ public class TestHashAggregationOperator
                 .addSequencePage(10, 300, 0)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(10, Unit.MEGABYTE))
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.of(10, Unit.MEGABYTE))
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
@@ -295,12 +302,13 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 spillEnabled,
                 succinctBytes(memoryLimitForMerge),
                 succinctBytes(memoryLimitForMergeWithMemory),
                 spillerFactory,
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         Operator operator = operatorFactory.createOperator(driverContext);
@@ -311,9 +319,9 @@ public class TestHashAggregationOperator
     @Test(dataProvider = "hashEnabled", expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded per-node user memory limit of 10B.*")
     public void testMemoryLimit(boolean hashEnabled)
     {
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        InternalAggregationFunction maxVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("max", AGGREGATE, parseTypeSignature(StandardTypes.VARCHAR), parseTypeSignature(StandardTypes.VARCHAR)));
+        Metadata metadata = createTestMetadataManager();
+        InternalAggregationFunction maxVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("max"), fromTypes(VARCHAR)));
 
         List<Integer> hashChannels = Ints.asList(1);
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, hashChannels, VARCHAR, BIGINT, VARCHAR, BIGINT);
@@ -323,7 +331,7 @@ public class TestHashAggregationOperator
                 .addSequencePage(10, 100, 0, 300, 0)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(10, Unit.BYTE))
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.ofBytes(10))
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
@@ -335,14 +343,15 @@ public class TestHashAggregationOperator
                 ImmutableList.of(),
                 Step.SINGLE,
                 ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty()),
-                        LONG_SUM.bind(ImmutableList.of(3), Optional.empty()),
+                        LONG_MIN.bind(ImmutableList.of(3), Optional.empty()),
                         LONG_AVERAGE.bind(ImmutableList.of(3), Optional.empty()),
                         maxVarcharColumn.bind(ImmutableList.of(2), Optional.empty())),
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         toPages(operatorFactory, driverContext, input);
@@ -377,12 +386,13 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 spillEnabled,
                 succinctBytes(memoryLimitForMerge),
                 succinctBytes(memoryLimitForMergeWithMemory),
                 spillerFactory,
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages);
@@ -403,8 +413,9 @@ public class TestHashAggregationOperator
                 Optional.of(1),
                 Optional.empty(),
                 1,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         // get result with yield; pick a relatively small buffer for aggregator's memory usage
@@ -440,7 +451,7 @@ public class TestHashAggregationOperator
                 .addSequencePage(10, 100)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(3, MEGABYTE))
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.of(3, MEGABYTE))
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
@@ -455,8 +466,9 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         toPages(operatorFactory, driverContext, input);
@@ -489,8 +501,9 @@ public class TestHashAggregationOperator
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         assertEquals(toPages(operatorFactory, createDriverContext(), input).size(), 2);
@@ -516,12 +529,13 @@ public class TestHashAggregationOperator
                 hashChannels,
                 ImmutableList.of(),
                 Step.PARTIAL,
-                ImmutableList.of(LONG_SUM.bind(ImmutableList.of(0), Optional.empty())),
+                ImmutableList.of(LONG_MIN.bind(ImmutableList.of(0), Optional.empty())),
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(1, KILOBYTE)),
+                Optional.of(DataSize.of(1, KILOBYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 true);
 
         DriverContext driverContext = createDriverContext(1024);
@@ -598,16 +612,17 @@ public class TestHashAggregationOperator
                 ImmutableList.of(),
                 Step.SINGLE,
                 false,
-                ImmutableList.of(LONG_SUM.bind(ImmutableList.of(0), Optional.empty())),
+                ImmutableList.of(LONG_MIN.bind(ImmutableList.of(0), Optional.empty())),
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 1,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 true,
-                new DataSize(smallPagesSpillThresholdSize, Unit.BYTE),
+                DataSize.ofBytes(smallPagesSpillThresholdSize),
                 succinctBytes(Integer.MAX_VALUE),
                 spillerFactory,
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         DriverContext driverContext = createDriverContext(smallPagesSpillThresholdSize);
@@ -623,9 +638,9 @@ public class TestHashAggregationOperator
     @Test
     public void testSpillerFailure()
     {
-        MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        InternalAggregationFunction maxVarcharColumn = metadata.getFunctionRegistry().getAggregateFunctionImplementation(
-                new Signature("max", AGGREGATE, parseTypeSignature(StandardTypes.VARCHAR), parseTypeSignature(StandardTypes.VARCHAR)));
+        Metadata metadata = createTestMetadataManager();
+        InternalAggregationFunction maxVarcharColumn = metadata.getAggregateFunctionImplementation(
+                metadata.resolveFunction(QualifiedName.of("max"), fromTypes(VARCHAR)));
 
         List<Integer> hashChannels = Ints.asList(1);
         ImmutableList<Type> types = ImmutableList.of(VARCHAR, BIGINT, VARCHAR, BIGINT);
@@ -652,18 +667,19 @@ public class TestHashAggregationOperator
                 Step.SINGLE,
                 false,
                 ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty()),
-                        LONG_SUM.bind(ImmutableList.of(3), Optional.empty()),
+                        LONG_MIN.bind(ImmutableList.of(3), Optional.empty()),
                         LONG_AVERAGE.bind(ImmutableList.of(3), Optional.empty()),
                         maxVarcharColumn.bind(ImmutableList.of(2), Optional.empty())),
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 true,
                 succinctBytes(8),
                 succinctBytes(Integer.MAX_VALUE),
                 new FailingSpillerFactory(),
                 joinCompiler,
+                blockTypeOperators,
                 false);
 
         try {
@@ -699,12 +715,13 @@ public class TestHashAggregationOperator
                 hashChannels,
                 ImmutableList.of(),
                 Step.SINGLE,
-                ImmutableList.of(LONG_SUM.bind(ImmutableList.of(0), Optional.empty())),
+                ImmutableList.of(LONG_MIN.bind(ImmutableList.of(0), Optional.empty())),
                 rowPagesBuilder.getHashChannel(),
                 Optional.empty(),
                 100_000,
-                Optional.of(new DataSize(16, MEGABYTE)),
+                Optional.of(DataSize.of(16, MEGABYTE)),
                 joinCompiler,
+                blockTypeOperators,
                 useSystemMemory);
 
         DriverContext driverContext = createDriverContext(1024);

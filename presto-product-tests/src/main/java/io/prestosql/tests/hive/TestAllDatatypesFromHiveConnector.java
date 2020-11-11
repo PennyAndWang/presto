@@ -13,7 +13,6 @@
  */
 package io.prestosql.tests.hive;
 
-import io.prestosql.tempto.ProductTest;
 import io.prestosql.tempto.Requirement;
 import io.prestosql.tempto.Requirements;
 import io.prestosql.tempto.RequirementsProvider;
@@ -39,9 +38,7 @@ import static io.prestosql.tempto.fulfillment.table.MutableTableRequirement.Stat
 import static io.prestosql.tempto.fulfillment.table.TableHandle.tableHandle;
 import static io.prestosql.tempto.fulfillment.table.TableRequirements.immutableTable;
 import static io.prestosql.tempto.query.QueryExecutor.query;
-import static io.prestosql.tests.TestGroups.AVRO;
 import static io.prestosql.tests.TestGroups.JDBC;
-import static io.prestosql.tests.TestGroups.POST_HIVE_1_0_1;
 import static io.prestosql.tests.TestGroups.SKIP_ON_CDH;
 import static io.prestosql.tests.TestGroups.SMOKE;
 import static io.prestosql.tests.hive.AllSimpleTypesTableDefinitions.ALL_HIVE_SIMPLE_TYPES_AVRO;
@@ -52,6 +49,7 @@ import static io.prestosql.tests.hive.AllSimpleTypesTableDefinitions.ALL_HIVE_SI
 import static io.prestosql.tests.hive.AllSimpleTypesTableDefinitions.populateDataToHiveTable;
 import static io.prestosql.tests.utils.QueryExecutors.onHive;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.sql.JDBCType.BIGINT;
 import static java.sql.JDBCType.BOOLEAN;
 import static java.sql.JDBCType.CHAR;
@@ -67,7 +65,7 @@ import static java.sql.JDBCType.VARBINARY;
 import static java.sql.JDBCType.VARCHAR;
 
 public class TestAllDatatypesFromHiveConnector
-        extends ProductTest
+        extends HiveProductTest
 {
     public static final class TextRequirements
             implements RequirementsProvider
@@ -126,7 +124,7 @@ public class TestAllDatatypesFromHiveConnector
     }
 
     @Requires(TextRequirements.class)
-    @Test(groups = {SMOKE})
+    @Test(groups = SMOKE)
     public void testSelectAllDatatypesTextFile()
     {
         String tableName = ALL_HIVE_SIMPLE_TYPES_TEXTFILE.getName();
@@ -151,11 +149,11 @@ public class TestAllDatatypesFromHiveConnector
                         "ala ma kot",
                         "ala ma    ",
                         true,
-                        "kot binarny".getBytes()));
+                        "kot binarny".getBytes(UTF_8)));
     }
 
     @Requires(OrcRequirements.class)
-    @Test(groups = {JDBC})
+    @Test(groups = JDBC)
     public void testSelectAllDatatypesOrc()
     {
         String tableName = mutableTableInstanceOf(ALL_HIVE_SIMPLE_TYPES_ORC).getNameInDatabase();
@@ -182,11 +180,11 @@ public class TestAllDatatypesFromHiveConnector
                         "ala ma kot",
                         "ala ma    ",
                         true,
-                        "kot binarny".getBytes()));
+                        "kot binarny".getBytes(UTF_8)));
     }
 
     @Requires(RcfileRequirements.class)
-    @Test(groups = {JDBC})
+    @Test(groups = JDBC)
     public void testSelectAllDatatypesRcfile()
     {
         String tableName = mutableTableInstanceOf(ALL_HIVE_SIMPLE_TYPES_RCFILE).getNameInDatabase();
@@ -213,11 +211,11 @@ public class TestAllDatatypesFromHiveConnector
                         "ala ma kot",
                         "ala ma    ",
                         true,
-                        "kot binarny".getBytes()));
+                        "kot binarny".getBytes(UTF_8)));
     }
 
     @Requires(AvroRequirements.class)
-    @Test(groups = {JDBC, SKIP_ON_CDH, AVRO})
+    @Test(groups = {JDBC, SKIP_ON_CDH /* CDH 5's Avro does not support date type */})
     public void testSelectAllDatatypesAvro()
     {
         String tableName = mutableTableInstanceOf(ALL_HIVE_SIMPLE_TYPES_AVRO).getNameInDatabase();
@@ -246,7 +244,7 @@ public class TestAllDatatypesFromHiveConnector
                 row("c_double", "double"),
                 row("c_decimal", "decimal(10,0)"),
                 row("c_decimal_w_params", "decimal(10,5)"),
-                row("c_timestamp", "timestamp"),
+                row("c_timestamp", "timestamp(3)"),
                 row("c_date", "date"),
                 row("c_string", "varchar"),
                 row("c_varchar", "varchar(10)"),
@@ -278,13 +276,16 @@ public class TestAllDatatypesFromHiveConnector
                         234.567,
                         new BigDecimal("346"),
                         new BigDecimal("345.67800"),
-                        Timestamp.valueOf(LocalDateTime.of(2015, 5, 10, 12, 15, 35, 123_000_000)),
+                        isHiveWithBrokenAvroTimestamps()
+                                // TODO (https://github.com/prestosql/presto/issues/1218) requires https://issues.apache.org/jira/browse/HIVE-21002
+                                ? Timestamp.valueOf(LocalDateTime.of(2015, 5, 10, 18, 0, 35, 123_000_000))
+                                : Timestamp.valueOf(LocalDateTime.of(2015, 5, 10, 12, 15, 35, 123_000_000)),
                         Date.valueOf("2015-05-10"),
                         "ala ma kota",
                         "ala ma kot",
                         "ala ma    ",
                         true,
-                        "kot binarny".getBytes()));
+                        "kot binarny".getBytes(UTF_8)));
     }
 
     private void assertProperAllDatatypesSchema(String tableName)
@@ -298,7 +299,7 @@ public class TestAllDatatypesFromHiveConnector
                 row("c_double", "double"),
                 row("c_decimal", "decimal(10,0)"),
                 row("c_decimal_w_params", "decimal(10,5)"),
-                row("c_timestamp", "timestamp"),
+                row("c_timestamp", "timestamp(3)"),
                 row("c_date", "date"),
                 row("c_string", "varchar"),
                 row("c_varchar", "varchar(10)"),
@@ -347,7 +348,7 @@ public class TestAllDatatypesFromHiveConnector
     }
 
     @Requires(ParquetRequirements.class)
-    @Test(groups = {POST_HIVE_1_0_1})
+    @Test
     public void testSelectAllDatatypesParquetFile()
     {
         String tableName = mutableTableInstanceOf(ALL_HIVE_SIMPLE_TYPES_PARQUET).getNameInDatabase();
@@ -378,7 +379,7 @@ public class TestAllDatatypesFromHiveConnector
                 row("c_double", "double"),
                 row("c_decimal", "decimal(10,0)"),
                 row("c_decimal_w_params", "decimal(10,5)"),
-                row("c_timestamp", "timestamp"),
+                row("c_timestamp", "timestamp(3)"),
                 row("c_string", "varchar"),
                 row("c_varchar", "varchar(10)"),
                 row("c_char", "char(10)"),
@@ -402,10 +403,21 @@ public class TestAllDatatypesFromHiveConnector
                         "ala ma kot",
                         "ala ma    ",
                         true,
-                        "kot binarny".getBytes()));
+                        "kot binarny".getBytes(UTF_8)));
     }
 
-    private static TableInstance mutableTableInstanceOf(TableDefinition tableDefinition)
+    private boolean isHiveWithBrokenAvroTimestamps()
+    {
+        // In 3.1.0 timestamp semantics in hive changed in backward incompatible way,
+        // which was fixed for Parquet and Avro in 3.1.2 (https://issues.apache.org/jira/browse/HIVE-21002)
+        // we do have a work-around for Parquet, but still need this for Avro until
+        // https://github.com/prestosql/presto/issues/5144 is addressed
+        return getHiveVersionMajor() == 3 &&
+                getHiveVersionMinor() == 1 &&
+                (getHiveVersionPatch() == 0 || getHiveVersionPatch() == 1);
+    }
+
+    private static TableInstance<?> mutableTableInstanceOf(TableDefinition tableDefinition)
     {
         if (tableDefinition.getDatabase().isPresent()) {
             return mutableTableInstanceOf(tableDefinition, tableDefinition.getDatabase().get());
@@ -415,12 +427,12 @@ public class TestAllDatatypesFromHiveConnector
         }
     }
 
-    private static TableInstance mutableTableInstanceOf(TableDefinition tableDefinition, String database)
+    private static TableInstance<?> mutableTableInstanceOf(TableDefinition tableDefinition, String database)
     {
         return mutableTableInstanceOf(tableHandleInSchema(tableDefinition).inDatabase(database));
     }
 
-    private static TableInstance mutableTableInstanceOf(TableHandle tableHandle)
+    private static TableInstance<?> mutableTableInstanceOf(TableHandle tableHandle)
     {
         return testContext().getDependency(MutableTablesState.class).get(tableHandle);
     }

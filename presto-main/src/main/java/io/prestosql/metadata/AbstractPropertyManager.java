@@ -17,15 +17,17 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import io.prestosql.Session;
 import io.prestosql.connector.CatalogName;
+import io.prestosql.security.AccessControl;
 import io.prestosql.spi.ErrorCodeSupplier;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.session.PropertyMetadata;
 import io.prestosql.spi.type.Type;
-import io.prestosql.sql.analyzer.SemanticException;
 import io.prestosql.sql.planner.ParameterRewriter;
 import io.prestosql.sql.tree.Expression;
 import io.prestosql.sql.tree.ExpressionTreeRewriter;
+import io.prestosql.sql.tree.NodeRef;
+import io.prestosql.sql.tree.Parameter;
 
 import java.util.List;
 import java.util.Map;
@@ -55,7 +57,7 @@ abstract class AbstractPropertyManager
 
     public final void addProperties(CatalogName catalogName, List<PropertyMetadata<?>> properties)
     {
-        requireNonNull(catalogName, "connectorId is null");
+        requireNonNull(catalogName, "catalogName is null");
         requireNonNull(properties, "properties is null");
 
         Map<String, PropertyMetadata<?>> propertiesByName = Maps.uniqueIndex(properties, PropertyMetadata::getName);
@@ -74,7 +76,8 @@ abstract class AbstractPropertyManager
             Map<String, Expression> sqlPropertyValues,
             Session session,
             Metadata metadata,
-            List<Expression> parameters)
+            AccessControl accessControl,
+            Map<NodeRef<Parameter>, Expression> parameters)
     {
         Map<String, PropertyMetadata<?>> supportedProperties = connectorProperties.get(catalogName);
         if (supportedProperties == null) {
@@ -88,7 +91,8 @@ abstract class AbstractPropertyManager
             String propertyName = sqlProperty.getKey().toLowerCase(ENGLISH);
             PropertyMetadata<?> property = supportedProperties.get(propertyName);
             if (property == null) {
-                throw new PrestoException(propertyError,
+                throw new PrestoException(
+                        propertyError,
                         format("Catalog '%s' does not support %s property '%s'",
                                 catalog,
                                 propertyType,
@@ -97,15 +101,17 @@ abstract class AbstractPropertyManager
 
             Object sqlObjectValue;
             try {
-                sqlObjectValue = evaluatePropertyValue(sqlProperty.getValue(), property.getSqlType(), session, metadata, parameters);
+                sqlObjectValue = evaluatePropertyValue(sqlProperty.getValue(), property.getSqlType(), session, metadata, accessControl, parameters);
             }
-            catch (SemanticException e) {
-                throw new PrestoException(propertyError,
-                        format("Invalid value for %s property '%s': Cannot convert '%s' to %s",
+            catch (PrestoException e) {
+                throw new PrestoException(
+                        propertyError,
+                        format("Invalid value for %s property '%s': Cannot convert [%s] to %s",
                                 propertyType,
                                 property.getName(),
                                 sqlProperty.getValue(),
-                                property.getSqlType()), e);
+                                property.getSqlType()),
+                        e);
             }
 
             Object value;
@@ -113,12 +119,15 @@ abstract class AbstractPropertyManager
                 value = property.decode(sqlObjectValue);
             }
             catch (Exception e) {
-                throw new PrestoException(propertyError,
-                        format("Unable to set %s property '%s' to '%s': %s",
+                throw new PrestoException(
+                        propertyError,
+                        format(
+                                "Unable to set %s property '%s' to [%s]: %s",
                                 propertyType,
                                 property.getName(),
                                 sqlProperty.getValue(),
-                                e.getMessage()), e);
+                                e.getMessage()),
+                        e);
             }
 
             properties.put(property.getName(), value);
@@ -142,10 +151,16 @@ abstract class AbstractPropertyManager
         return ImmutableMap.copyOf(connectorProperties);
     }
 
-    private Object evaluatePropertyValue(Expression expression, Type expectedType, Session session, Metadata metadata, List<Expression> parameters)
+    private Object evaluatePropertyValue(
+            Expression expression,
+            Type expectedType,
+            Session session,
+            Metadata metadata,
+            AccessControl accessControl,
+            Map<NodeRef<Parameter>, Expression> parameters)
     {
         Expression rewritten = ExpressionTreeRewriter.rewriteWith(new ParameterRewriter(parameters), expression);
-        Object value = evaluateConstantExpression(rewritten, expectedType, metadata, session, parameters);
+        Object value = evaluateConstantExpression(rewritten, expectedType, metadata, session, accessControl, parameters);
 
         // convert to object value type of SQL type
         BlockBuilder blockBuilder = expectedType.createBlockBuilder(null, 1);

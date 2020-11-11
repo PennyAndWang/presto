@@ -13,25 +13,30 @@
  */
 package io.prestosql.sql.planner.planprinter;
 
-import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.units.DataSize;
 import io.prestosql.cost.PlanCostEstimate;
+import io.prestosql.cost.PlanNodeStatsAndCostSummary;
 import io.prestosql.cost.PlanNodeStatsEstimate;
 import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.planprinter.NodeRepresentation.TypedSymbol;
 
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.airlift.units.DataSize.succinctBytes;
+import static java.lang.Double.NEGATIVE_INFINITY;
+import static java.lang.Double.POSITIVE_INFINITY;
 import static java.lang.Double.isFinite;
 import static java.lang.Double.isNaN;
 import static java.lang.String.format;
 import static java.util.Collections.emptyMap;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
@@ -51,33 +56,41 @@ public class TextRenderer
     public String render(PlanRepresentation plan)
     {
         StringBuilder output = new StringBuilder();
-        return writeTextOutput(output, plan, level, plan.getRoot());
+        NodeRepresentation root = plan.getRoot();
+        boolean hasChildren = hasChildren(root, plan);
+        return writeTextOutput(output, plan, Indent.newInstance(level, hasChildren), root);
     }
 
-    private String writeTextOutput(StringBuilder output, PlanRepresentation plan, int level, NodeRepresentation node)
+    private String writeTextOutput(StringBuilder output, PlanRepresentation plan, Indent indent, NodeRepresentation node)
     {
-        output.append(indentString(level))
-                .append("- ")
+        output.append(indent.nodeIndent())
                 .append(node.getName())
                 .append(node.getIdentifier())
-                .append(" => [")
-                .append(node.getOutputs().stream()
-                        .map(s -> s.getSymbol() + ":" + s.getType())
-                        .collect(joining(", ")))
-                .append("]\n");
+                .append("\n");
+
+        String columns = node.getOutputs().stream()
+                .map(s -> s.getSymbol() + ":" + s.getType())
+                .collect(joining(", "));
+
+        output.append(indentMultilineString("Layout: [" + columns + "]\n", indent.detailIndent()));
+
+        String reorderJoinStatsAndCost = printReorderJoinStatsAndCost(node);
+        if (!reorderJoinStatsAndCost.isEmpty()) {
+            output.append(indentMultilineString(reorderJoinStatsAndCost, indent.detailIndent()));
+        }
 
         String estimates = printEstimates(plan, node);
         if (!estimates.isEmpty()) {
-            output.append(indentMultilineString(estimates, level + 2));
+            output.append(indentMultilineString(estimates, indent.detailIndent()));
         }
 
         String stats = printStats(plan, node);
         if (!stats.isEmpty()) {
-            output.append(indentMultilineString(stats, level + 2));
+            output.append(indentMultilineString(stats, indent.detailIndent()));
         }
 
         if (!node.getDetails().isEmpty()) {
-            String details = indentMultilineString(node.getDetails(), level + 2);
+            String details = indentMultilineString(node.getDetails(), indent.detailIndent());
             output.append(details);
             if (!details.endsWith("\n")) {
                 output.append('\n');
@@ -90,8 +103,9 @@ public class TextRenderer
                 .map(Optional::get)
                 .collect(toList());
 
-        for (NodeRepresentation child : children) {
-            writeTextOutput(output, plan, level + 1, child);
+        for (Iterator<NodeRepresentation> iterator = children.iterator(); iterator.hasNext(); ) {
+            NodeRepresentation child = iterator.next();
+            writeTextOutput(output, plan, indent.forChild(!iterator.hasNext(), hasChildren(child, plan)), child);
         }
 
         return output.toString();
@@ -100,7 +114,7 @@ public class TextRenderer
     private String printStats(PlanRepresentation plan, NodeRepresentation node)
     {
         StringBuilder output = new StringBuilder();
-        if (!node.getStats().isPresent() || !(plan.getTotalCpuTime().isPresent() && plan.getTotalScheduledTime().isPresent())) {
+        if (node.getStats().isEmpty() || !(plan.getTotalCpuTime().isPresent() && plan.getTotalScheduledTime().isPresent())) {
             return "";
         }
 
@@ -182,7 +196,7 @@ public class TextRenderer
         }
 
         output.append(format("Active Drivers: [ %d / %d ]\n", stats.getActiveDrivers(), stats.getTotalDrivers()));
-        output.append(format("Index size: std.dev.: %s bytes , %s rows\n", formatDouble(stats.getIndexSizeStdDev()), formatDouble(stats.getIndexPositionsStdDev())));
+        output.append(format("Index size: std.dev.: %s bytes, %s rows\n", formatDouble(stats.getIndexSizeStdDev()), formatDouble(stats.getIndexPositionsStdDev())));
         output.append(format("Index count per driver: std.dev.: %s\n", formatDouble(stats.getIndexCountPerDriverStdDev())));
         output.append(format("Rows per driver: std.dev.: %s\n", formatDouble(stats.getRowsPerDriverStdDev())));
         output.append(format("Size of partition: std.dev.: %s\n", formatDouble(stats.getPartitionRowsStdDev())));
@@ -203,6 +217,25 @@ public class TextRenderer
         }
 
         return ImmutableMap.of();
+    }
+
+    private String printReorderJoinStatsAndCost(NodeRepresentation node)
+    {
+        if (verbose && node.getReorderJoinStatsAndCost().isPresent()) {
+            return format("Reorder joins cost : %s\n", formatPlanNodeStatsAndCostSummary(node.getReorderJoinStatsAndCost().get()));
+        }
+        return "";
+    }
+
+    private String formatPlanNodeStatsAndCostSummary(PlanNodeStatsAndCostSummary stats)
+    {
+        requireNonNull(stats, "stats is null");
+        return format("{rows: %s (%s), cpu: %s, memory: %s, network: %s}",
+                formatAsLong(stats.getOutputRowCount()),
+                formatAsDataSize(stats.getOutputSizeInBytes()),
+                formatAsCpuCost(stats.getCpuCost()),
+                formatAsDataSize(stats.getMemoryCost()),
+                formatAsDataSize(stats.getNetworkCost()));
     }
 
     private String printEstimates(PlanRepresentation plan, NodeRepresentation node)
@@ -226,10 +259,10 @@ public class TextRenderer
 
             output.append(format("{rows: %s (%s), cpu: %s, memory: %s, network: %s}",
                     formatAsLong(stats.getOutputRowCount()),
-                    formatEstimateAsDataSize(stats.getOutputSizeInBytes(outputSymbols, plan.getTypes())),
-                    formatDouble(cost.getCpuCost()),
-                    formatDouble(cost.getMaxMemory()),
-                    formatDouble(cost.getNetworkCost())));
+                    formatAsDataSize(stats.getOutputSizeInBytes(outputSymbols, plan.getTypes())),
+                    formatAsCpuCost(cost.getCpuCost()),
+                    formatAsDataSize(cost.getMaxMemory()),
+                    formatAsDataSize(cost.getNetworkCost())));
 
             if (i < estimateCount - 1) {
                 output.append("/");
@@ -240,9 +273,11 @@ public class TextRenderer
         return output.toString();
     }
 
-    private static String formatEstimateAsDataSize(double value)
+    private static boolean hasChildren(NodeRepresentation node, PlanRepresentation plan)
     {
-        return isNaN(value) ? "?" : succinctBytes((long) value).toString();
+        return node.getChildren().stream()
+                .map(plan::getNode)
+                .anyMatch(Optional::isPresent);
     }
 
     private static String formatAsLong(double value)
@@ -252,6 +287,26 @@ public class TextRenderer
         }
 
         return "?";
+    }
+
+    private static String formatAsCpuCost(double value)
+    {
+        return formatAsDataSize(value).replaceAll("B$", "");
+    }
+
+    private static String formatAsDataSize(double value)
+    {
+        if (isNaN(value)) {
+            return "?";
+        }
+        if (value == POSITIVE_INFINITY) {
+            return "+\u221E";
+        }
+        if (value == NEGATIVE_INFINITY) {
+            return "-\u221E";
+        }
+
+        return DataSize.succinctBytes(Math.round(value)).toString();
     }
 
     static String formatDouble(double value)
@@ -271,11 +326,75 @@ public class TextRenderer
 
     static String indentString(int indent)
     {
-        return Strings.repeat("    ", indent);
+        return "    ".repeat(indent);
     }
 
-    private static String indentMultilineString(String string, int level)
+    private static String indentMultilineString(String string, String indent)
     {
-        return string.replaceAll("(?m)^", indentString(level));
+        return string.replaceAll("(?m)^", indent);
+    }
+
+    private static class Indent
+    {
+        private static final String VERTICAL_LINE = "\u2502";
+        private static final String LAST_NODE = "\u2514\u2500";
+        private static final String INTERMEDIATE_NODE = "\u251c\u2500";
+
+        private final String firstLinePrefix;
+        private final String nextLinesPrefix;
+        private final boolean hasChildren;
+
+        public static Indent newInstance(int level, boolean hasChildren)
+        {
+            String indent = indentString(level);
+            return new Indent(indent, indent, hasChildren);
+        }
+
+        private Indent(String firstLinePrefix, String nextLinesPrefix, boolean hasChildren)
+        {
+            this.firstLinePrefix = firstLinePrefix;
+            this.nextLinesPrefix = nextLinesPrefix;
+            this.hasChildren = hasChildren;
+        }
+
+        public Indent forChild(boolean last, boolean hasChildren)
+        {
+            String first;
+            String next;
+
+            if (last) {
+                first = pad(LAST_NODE, 3);
+                next = pad("", 3);
+            }
+            else {
+                first = pad(INTERMEDIATE_NODE, 3);
+                next = pad(VERTICAL_LINE, 3);
+            }
+
+            return new Indent(nextLinesPrefix + first, nextLinesPrefix + next, hasChildren);
+        }
+
+        public String nodeIndent()
+        {
+            return firstLinePrefix;
+        }
+
+        public String detailIndent()
+        {
+            String indent = "";
+
+            if (hasChildren) {
+                indent = VERTICAL_LINE;
+            }
+
+            return nextLinesPrefix + pad(indent, 4);
+        }
+
+        private static String pad(String text, int length)
+        {
+            checkArgument(text.length() <= length, "text is longer that length");
+
+            return text + " ".repeat(length - text.length());
+        }
     }
 }

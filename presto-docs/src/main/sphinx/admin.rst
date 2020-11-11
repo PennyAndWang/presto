@@ -7,8 +7,10 @@ Administration
 
     admin/web-interface
     admin/tuning
+    admin/jmx
     admin/properties
     admin/spill
     admin/resource-groups
     admin/session-property-managers
     admin/dist-sort
+    admin/dynamic-filtering

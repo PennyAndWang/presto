@@ -22,22 +22,6 @@ import java.util.Map;
 
 public interface Predicate
 {
-    Predicate TRUE = new Predicate()
-    {
-        @Override
-        public boolean matches(long numberOfRows, Map<ColumnDescriptor, Statistics<?>> statistics, ParquetDataSourceId id, boolean failOnCorruptedParquetStatistics)
-                throws ParquetCorruptionException
-        {
-            return true;
-        }
-
-        @Override
-        public boolean matches(Map<ColumnDescriptor, DictionaryDescriptor> dictionaries)
-        {
-            return true;
-        }
-    };
-
     /**
      * Should the Parquet Reader process a file section with the specified statistics.
      *
@@ -45,15 +29,16 @@ public interface Predicate
      * Statistics to determine if a column is only null
      * @param statistics column statistics
      * @param id Parquet file name
-     * @param failOnCorruptedParquetStatistics whether to fail query when scanning a Parquet file with corrupted statistics
      */
-    boolean matches(long numberOfRows, Map<ColumnDescriptor, Statistics<?>> statistics, ParquetDataSourceId id, boolean failOnCorruptedParquetStatistics)
+    boolean matches(long numberOfRows, Map<ColumnDescriptor, Statistics<?>> statistics, ParquetDataSourceId id)
             throws ParquetCorruptionException;
 
     /**
-     * Should the Parquet Reader process a file section with the specified dictionary.
+     * Should the Parquet Reader process a file section with the specified dictionary based on that
+     * single dictionary. This is safe to check repeatedly to avoid loading more parquet dictionaries
+     * if the section can already be eliminated.
      *
-     * @param dictionaries dictionaries per column
+     * @param dictionary The single column dictionary
      */
-    boolean matches(Map<ColumnDescriptor, DictionaryDescriptor> dictionaries);
+    boolean matches(DictionaryDescriptor dictionary);
 }

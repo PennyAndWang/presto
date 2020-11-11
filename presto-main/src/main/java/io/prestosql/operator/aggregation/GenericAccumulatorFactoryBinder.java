@@ -17,9 +17,10 @@ import com.google.common.annotations.VisibleForTesting;
 import io.prestosql.Session;
 import io.prestosql.operator.PagesIndex;
 import io.prestosql.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.gen.JoinCompiler;
+import io.prestosql.type.BlockTypeOperators;
 
 import java.lang.reflect.Constructor;
 import java.util.List;
@@ -32,11 +33,13 @@ public class GenericAccumulatorFactoryBinder
 {
     private final List<AccumulatorStateDescriptor> stateDescriptors;
     private final Constructor<? extends Accumulator> accumulatorConstructor;
+    private final boolean accumulatorHasRemoveInput;
     private final Constructor<? extends GroupedAccumulator> groupedAccumulatorConstructor;
 
     public GenericAccumulatorFactoryBinder(
             List<AccumulatorStateDescriptor> stateDescriptors,
             Class<? extends Accumulator> accumulatorClass,
+            boolean accumulatorHasRemoveInput,
             Class<? extends GroupedAccumulator> groupedAccumulatorClass)
     {
         this.stateDescriptors = requireNonNull(stateDescriptors, "stateDescriptors is null");
@@ -47,6 +50,8 @@ public class GenericAccumulatorFactoryBinder
                     List.class,     /* List<Integer> inputChannel */
                     Optional.class, /* Optional<Integer> maskChannel */
                     List.class      /* List<LambdaProvider> lambdaProviders */);
+
+            this.accumulatorHasRemoveInput = accumulatorHasRemoveInput;
 
             groupedAccumulatorConstructor = groupedAccumulatorClass.getConstructor(
                     List.class,     /* List<AccumulatorStateDescriptor> stateDescriptors */
@@ -69,12 +74,14 @@ public class GenericAccumulatorFactoryBinder
             PagesIndex.Factory pagesIndexFactory,
             boolean distinct,
             JoinCompiler joinCompiler,
+            BlockTypeOperators blockTypeOperators,
             List<LambdaProvider> lambdaProviders,
             Session session)
     {
         return new GenericAccumulatorFactory(
                 stateDescriptors,
                 accumulatorConstructor,
+                accumulatorHasRemoveInput,
                 groupedAccumulatorConstructor,
                 lambdaProviders,
                 argumentChannels,
@@ -84,6 +91,7 @@ public class GenericAccumulatorFactoryBinder
                 orderings,
                 pagesIndexFactory,
                 joinCompiler,
+                blockTypeOperators,
                 session,
                 distinct);
     }

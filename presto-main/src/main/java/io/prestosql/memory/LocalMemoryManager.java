@@ -22,13 +22,14 @@ import io.prestosql.spi.memory.MemoryPoolInfo;
 
 import javax.inject.Inject;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
-import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.prestosql.memory.NodeMemoryConfig.QUERY_MAX_MEMORY_PER_NODE_CONFIG;
 import static io.prestosql.memory.NodeMemoryConfig.QUERY_MAX_TOTAL_MEMORY_PER_NODE_CONFIG;
 import static java.lang.String.format;
@@ -38,6 +39,7 @@ public final class LocalMemoryManager
 {
     public static final MemoryPoolId GENERAL_POOL = new MemoryPoolId("general");
     public static final MemoryPoolId RESERVED_POOL = new MemoryPoolId("reserved");
+    private static final OperatingSystemMXBean OPERATING_SYSTEM_MX_BEAN = ManagementFactory.getOperatingSystemMXBean();
 
     private DataSize maxMemory;
     private Map<MemoryPoolId, MemoryPool> pools;
@@ -58,7 +60,7 @@ public final class LocalMemoryManager
     private void configureMemoryPools(NodeMemoryConfig config, long availableMemory)
     {
         validateHeapHeadroom(config, availableMemory);
-        maxMemory = new DataSize(availableMemory - config.getHeapHeadroom().toBytes(), BYTE);
+        maxMemory = DataSize.ofBytes(availableMemory - config.getHeapHeadroom().toBytes());
         checkArgument(
                 config.getMaxQueryMemoryPerNode().toBytes() <= config.getMaxQueryTotalMemoryPerNode().toBytes(),
                 "Max query memory per node (%s) cannot be greater than the max query total memory per node (%s).",
@@ -66,12 +68,12 @@ public final class LocalMemoryManager
                 QUERY_MAX_TOTAL_MEMORY_PER_NODE_CONFIG);
         ImmutableMap.Builder<MemoryPoolId, MemoryPool> builder = ImmutableMap.builder();
         long generalPoolSize = maxMemory.toBytes();
-        if (config.isReservedPoolEnabled()) {
+        if (!config.isReservedPoolDisabled()) {
             builder.put(RESERVED_POOL, new MemoryPool(RESERVED_POOL, config.getMaxQueryTotalMemoryPerNode()));
             generalPoolSize -= config.getMaxQueryTotalMemoryPerNode().toBytes();
         }
         verify(generalPoolSize > 0, "general memory pool size is 0");
-        builder.put(GENERAL_POOL, new MemoryPool(GENERAL_POOL, new DataSize(generalPoolSize, BYTE)));
+        builder.put(GENERAL_POOL, new MemoryPool(GENERAL_POOL, DataSize.ofBytes(generalPoolSize)));
         this.pools = builder.build();
     }
 
@@ -96,7 +98,7 @@ public final class LocalMemoryManager
         for (Map.Entry<MemoryPoolId, MemoryPool> entry : pools.entrySet()) {
             builder.put(entry.getKey(), entry.getValue().getInfo());
         }
-        return new MemoryInfo(maxMemory, builder.build());
+        return new MemoryInfo(OPERATING_SYSTEM_MX_BEAN.getAvailableProcessors(), maxMemory, builder.build());
     }
 
     public List<MemoryPool> getPools()

@@ -27,6 +27,7 @@ import io.prestosql.plugin.hive.HiveBasicStatistics;
 import io.prestosql.plugin.hive.HiveColumnHandle;
 import io.prestosql.plugin.hive.HivePartition;
 import io.prestosql.plugin.hive.PartitionStatistics;
+import io.prestosql.plugin.hive.authentication.HiveIdentity;
 import io.prestosql.plugin.hive.metastore.DateStatistics;
 import io.prestosql.plugin.hive.metastore.DecimalStatistics;
 import io.prestosql.plugin.hive.metastore.DoubleStatistics;
@@ -42,9 +43,11 @@ import io.prestosql.spi.statistics.ColumnStatistics;
 import io.prestosql.spi.statistics.DoubleRange;
 import io.prestosql.spi.statistics.Estimate;
 import io.prestosql.spi.statistics.TableStatistics;
+import io.prestosql.spi.type.CharType;
 import io.prestosql.spi.type.DecimalType;
 import io.prestosql.spi.type.Decimals;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.VarcharType;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -58,9 +61,12 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.stream.DoubleStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Maps.immutableEntry;
@@ -71,7 +77,6 @@ import static io.prestosql.plugin.hive.HiveSessionProperties.getPartitionStatist
 import static io.prestosql.plugin.hive.HiveSessionProperties.isIgnoreCorruptedStatistics;
 import static io.prestosql.plugin.hive.HiveSessionProperties.isStatisticsEnabled;
 import static io.prestosql.spi.type.BigintType.BIGINT;
-import static io.prestosql.spi.type.Chars.isCharType;
 import static io.prestosql.spi.type.DateType.DATE;
 import static io.prestosql.spi.type.Decimals.isLongDecimal;
 import static io.prestosql.spi.type.Decimals.isShortDecimal;
@@ -80,7 +85,6 @@ import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.RealType.REAL;
 import static io.prestosql.spi.type.SmallintType.SMALLINT;
 import static io.prestosql.spi.type.TinyintType.TINYINT;
-import static io.prestosql.spi.type.Varchars.isVarcharType;
 import static java.lang.Double.isFinite;
 import static java.lang.Double.isNaN;
 import static java.lang.Double.parseDouble;
@@ -99,7 +103,7 @@ public class MetastoreHiveStatisticsProvider
     public MetastoreHiveStatisticsProvider(SemiTransactionalHiveMetastore metastore)
     {
         requireNonNull(metastore, "metastore is null");
-        this.statisticsProvider = (table, hivePartitions) -> getPartitionsStatistics(metastore, table, hivePartitions);
+        this.statisticsProvider = (session, table, hivePartitions) -> getPartitionsStatistics(session, metastore, table, hivePartitions);
     }
 
     @VisibleForTesting
@@ -108,7 +112,7 @@ public class MetastoreHiveStatisticsProvider
         this.statisticsProvider = requireNonNull(statisticsProvider, "statisticsProvider is null");
     }
 
-    private static Map<String, PartitionStatistics> getPartitionsStatistics(SemiTransactionalHiveMetastore metastore, SchemaTableName table, List<HivePartition> hivePartitions)
+    private static Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SemiTransactionalHiveMetastore metastore, SchemaTableName table, List<HivePartition> hivePartitions)
     {
         if (hivePartitions.isEmpty()) {
             return ImmutableMap.of();
@@ -116,12 +120,12 @@ public class MetastoreHiveStatisticsProvider
         boolean unpartitioned = hivePartitions.stream().anyMatch(partition -> partition.getPartitionId().equals(UNPARTITIONED_ID));
         if (unpartitioned) {
             checkArgument(hivePartitions.size() == 1, "expected only one hive partition");
-            return ImmutableMap.of(UNPARTITIONED_ID, metastore.getTableStatistics(table.getSchemaName(), table.getTableName()));
+            return ImmutableMap.of(UNPARTITIONED_ID, metastore.getTableStatistics(new HiveIdentity(session), table.getSchemaName(), table.getTableName()));
         }
         Set<String> partitionNames = hivePartitions.stream()
                 .map(HivePartition::getPartitionId)
                 .collect(toImmutableSet());
-        return metastore.getPartitionStatistics(table.getSchemaName(), table.getTableName(), partitionNames);
+        return metastore.getPartitionStatistics(new HiveIdentity(session), table.getSchemaName(), table.getTableName(), partitionNames);
     }
 
     @Override
@@ -141,7 +145,7 @@ public class MetastoreHiveStatisticsProvider
         int sampleSize = getPartitionStatisticsSampleSize(session);
         List<HivePartition> partitionsSample = getPartitionsSample(partitions, sampleSize);
         try {
-            Map<String, PartitionStatistics> statisticsSample = statisticsProvider.getPartitionsStatistics(table, partitionsSample);
+            Map<String, PartitionStatistics> statisticsSample = statisticsProvider.getPartitionsStatistics(session, table, partitionsSample);
             validatePartitionStatistics(table, statisticsSample);
             return getTableStatistics(columns, columnTypes, partitions, statisticsSample);
         }
@@ -160,7 +164,7 @@ public class MetastoreHiveStatisticsProvider
         result.setRowCount(Estimate.of(0));
         columns.forEach((columnName, columnHandle) -> {
             Type columnType = columnTypes.get(columnName);
-            verify(columnType != null, "columnType is missing for column: %s", columnName);
+            verifyNotNull(columnType, "columnType is missing for column: %s", columnName);
             ColumnStatistics.Builder columnStatistics = ColumnStatistics.builder();
             columnStatistics.setNullsFraction(Estimate.of(0));
             columnStatistics.setDistinctValuesCount(Estimate.of(0));
@@ -394,7 +398,7 @@ public class MetastoreHiveStatisticsProvider
         checkArgument(!partitions.isEmpty(), "partitions is empty");
 
         OptionalDouble optionalAverageRowsPerPartition = calculateAverageRowsPerPartition(statistics.values());
-        if (!optionalAverageRowsPerPartition.isPresent()) {
+        if (optionalAverageRowsPerPartition.isEmpty()) {
             return TableStatistics.empty();
         }
         double averageRowsPerPartition = optionalAverageRowsPerPartition.getAsDouble();
@@ -518,7 +522,7 @@ public class MetastoreHiveStatisticsProvider
 
     private static boolean hasDataSize(Type type)
     {
-        return isVarcharType(type) || isCharType(type);
+        return type instanceof VarcharType || type instanceof CharType;
     }
 
     private static int getSize(NullableValue nullableValue)
@@ -548,11 +552,7 @@ public class MetastoreHiveStatisticsProvider
     @VisibleForTesting
     static Optional<DoubleRange> calculateRangeForPartitioningKey(HiveColumnHandle column, Type type, List<HivePartition> partitions)
     {
-        if (!isRangeSupported(type)) {
-            return Optional.empty();
-        }
-
-        List<Double> values = partitions.stream()
+        List<OptionalDouble> convertedValues = partitions.stream()
                 .map(HivePartition::getKeys)
                 .map(keys -> keys.get(column))
                 .filter(value -> !value.isNull())
@@ -560,51 +560,49 @@ public class MetastoreHiveStatisticsProvider
                 .map(value -> convertPartitionValueToDouble(type, value))
                 .collect(toImmutableList());
 
-        if (values.isEmpty()) {
+        if (convertedValues.stream().noneMatch(OptionalDouble::isPresent)) {
+            return Optional.empty();
+        }
+        double[] values = convertedValues.stream()
+                .peek(convertedValue -> checkState(convertedValue.isPresent(), "convertedValue is missing"))
+                .mapToDouble(OptionalDouble::getAsDouble)
+                .toArray();
+        verify(values.length != 0, "No values");
+
+        if (DoubleStream.of(values).anyMatch(Double::isNaN)) {
             return Optional.empty();
         }
 
-        double min = values.get(0);
-        double max = values.get(0);
-
-        for (Double value : values) {
-            if (value > max) {
-                max = value;
-            }
-            if (value < min) {
-                min = value;
-            }
-        }
-
+        double min = DoubleStream.of(values).min().orElseThrow();
+        double max = DoubleStream.of(values).max().orElseThrow();
         return Optional.of(new DoubleRange(min, max));
     }
 
-    @VisibleForTesting
-    static double convertPartitionValueToDouble(Type type, Object value)
+    public static OptionalDouble convertPartitionValueToDouble(Type type, Object value)
     {
         if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(SMALLINT) || type.equals(TINYINT)) {
-            return (Long) value;
+            return OptionalDouble.of((Long) value);
         }
         if (type.equals(DOUBLE)) {
-            return (Double) value;
+            return OptionalDouble.of((Double) value);
         }
         if (type.equals(REAL)) {
-            return intBitsToFloat(((Long) value).intValue());
+            return OptionalDouble.of(intBitsToFloat(((Long) value).intValue()));
         }
         if (type instanceof DecimalType) {
             DecimalType decimalType = (DecimalType) type;
             if (isShortDecimal(decimalType)) {
-                return parseDouble(Decimals.toString((Long) value, decimalType.getScale()));
+                return OptionalDouble.of(parseDouble(Decimals.toString((Long) value, decimalType.getScale())));
             }
             if (isLongDecimal(decimalType)) {
-                return parseDouble(Decimals.toString((Slice) value, decimalType.getScale()));
+                return OptionalDouble.of(parseDouble(Decimals.toString((Slice) value, decimalType.getScale())));
             }
             throw new IllegalArgumentException("Unexpected decimal type: " + decimalType);
         }
         if (type.equals(DATE)) {
-            return (Long) value;
+            return OptionalDouble.of((Long) value);
         }
-        throw new IllegalArgumentException("Unexpected type: " + type);
+        return OptionalDouble.empty();
     }
 
     @VisibleForTesting
@@ -661,7 +659,7 @@ public class MetastoreHiveStatisticsProvider
     {
         List<PartitionStatistics> statisticsWithKnownRowCountAndNullsCount = partitionStatistics.stream()
                 .filter(statistics -> {
-                    if (!statistics.getBasicStatistics().getRowCount().isPresent()) {
+                    if (statistics.getBasicStatistics().getRowCount().isEmpty()) {
                         return false;
                     }
                     HiveColumnStatistics columnStatistics = statistics.getColumnStatistics().get(column);
@@ -682,7 +680,7 @@ public class MetastoreHiveStatisticsProvider
             long rowCount = statistics.getBasicStatistics().getRowCount().orElseThrow(() -> new VerifyException("rowCount is not present"));
             verify(rowCount >= 0, "rowCount must be greater than or equal to zero");
             HiveColumnStatistics columnStatistics = statistics.getColumnStatistics().get(column);
-            verify(columnStatistics != null, "columnStatistics is null");
+            verifyNotNull(columnStatistics, "columnStatistics is null");
             long nullsCount = columnStatistics.getNullsCount().orElseThrow(() -> new VerifyException("nullsCount is not present"));
             verify(nullsCount >= 0, "nullsCount must be greater than or equal to zero");
             verify(nullsCount <= rowCount, "nullsCount must be less than or equal to rowCount. nullsCount: %s. rowCount: %s.", nullsCount, rowCount);
@@ -707,7 +705,7 @@ public class MetastoreHiveStatisticsProvider
     {
         List<PartitionStatistics> statisticsWithKnownRowCountAndDataSize = partitionStatistics.stream()
                 .filter(statistics -> {
-                    if (!statistics.getBasicStatistics().getRowCount().isPresent()) {
+                    if (statistics.getBasicStatistics().getRowCount().isEmpty()) {
                         return false;
                     }
                     HiveColumnStatistics columnStatistics = statistics.getColumnStatistics().get(column);
@@ -728,7 +726,7 @@ public class MetastoreHiveStatisticsProvider
             long rowCount = statistics.getBasicStatistics().getRowCount().orElseThrow(() -> new VerifyException("rowCount is not present"));
             verify(rowCount >= 0, "rowCount must be greater than or equal to zero");
             HiveColumnStatistics columnStatistics = statistics.getColumnStatistics().get(column);
-            verify(columnStatistics != null, "columnStatistics is null");
+            verifyNotNull(columnStatistics, "columnStatistics is null");
             long dataSize = columnStatistics.getTotalSizeInBytes().orElseThrow(() -> new VerifyException("totalSizeInBytes is not present"));
             verify(dataSize >= 0, "dataSize must be greater than or equal to zero");
             knownRowCount += rowCount;
@@ -750,26 +748,11 @@ public class MetastoreHiveStatisticsProvider
     @VisibleForTesting
     static Optional<DoubleRange> calculateRange(Type type, List<HiveColumnStatistics> columnStatistics)
     {
-        if (!isRangeSupported(type)) {
-            return Optional.empty();
-        }
         return columnStatistics.stream()
                 .map(statistics -> createRange(type, statistics))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .reduce(DoubleRange::union);
-    }
-
-    private static boolean isRangeSupported(Type type)
-    {
-        return type.equals(TINYINT)
-                || type.equals(SMALLINT)
-                || type.equals(INTEGER)
-                || type.equals(BIGINT)
-                || type.equals(REAL)
-                || type.equals(DOUBLE)
-                || type.equals(DATE)
-                || type instanceof DecimalType;
     }
 
     private static Optional<DoubleRange> createRange(Type type, HiveColumnStatistics statistics)
@@ -786,7 +769,7 @@ public class MetastoreHiveStatisticsProvider
         if (type instanceof DecimalType) {
             return statistics.getDecimalStatistics().flatMap(MetastoreHiveStatisticsProvider::createDecimalRange);
         }
-        throw new IllegalArgumentException("Unexpected type: " + type);
+        return Optional.empty();
     }
 
     private static Optional<DoubleRange> createIntegerRange(Type type, IntegerStatistics statistics)
@@ -846,6 +829,6 @@ public class MetastoreHiveStatisticsProvider
     @VisibleForTesting
     interface PartitionsStatisticsProvider
     {
-        Map<String, PartitionStatistics> getPartitionsStatistics(SchemaTableName table, List<HivePartition> hivePartitions);
+        Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SchemaTableName table, List<HivePartition> hivePartitions);
     }
 }

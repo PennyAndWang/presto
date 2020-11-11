@@ -14,18 +14,29 @@
 package io.prestosql.plugin.hive;
 
 import org.apache.hadoop.net.NetUtils;
+import org.testng.SkipException;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Parameters;
+import org.testng.annotations.Test;
 
-import java.net.UnknownHostException;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHive
         extends AbstractTestHive
 {
-    @Parameters({"hive.hadoop2.metastoreHost", "hive.hadoop2.metastorePort", "hive.hadoop2.databaseName", "hive.hadoop2.timeZone"})
+    private int hiveVersionMajor;
+
+    @Parameters({
+            "hive.hadoop2.metastoreHost",
+            "hive.hadoop2.metastorePort",
+            "hive.hadoop2.databaseName",
+            "hive.hadoop2.hiveVersionMajor",
+            "hive.hadoop2.timeZone",
+    })
     @BeforeClass
-    public void initialize(String host, int port, String databaseName, String timeZone)
-            throws UnknownHostException
+    public void initialize(String host, int port, String databaseName, int hiveVersionMajor, String timeZone)
     {
         String hadoopMasterIp = System.getProperty("hadoop-master-ip");
         if (hadoopMasterIp != null) {
@@ -35,6 +46,51 @@ public class TestHive
             NetUtils.addStaticResolution("hadoop-master", hadoopMasterIp);
         }
 
-        setup(host, port, databaseName, timeZone);
+        checkArgument(hiveVersionMajor > 0, "Invalid hiveVersionMajor: %s", hiveVersionMajor);
+        setup(host, port, databaseName, hiveVersionMajor >= 3 ? "UTC" : timeZone);
+
+        this.hiveVersionMajor = hiveVersionMajor;
+    }
+
+    private int getHiveVersionMajor()
+    {
+        checkState(hiveVersionMajor > 0, "hiveVersionMajor not set");
+        return hiveVersionMajor;
+    }
+
+    @Override
+    public void testGetPartitionSplitsTableOfflinePartition()
+    {
+        if (getHiveVersionMajor() >= 2) {
+            throw new SkipException("ALTER TABLE .. ENABLE OFFLINE was removed in Hive 2.0 and this is a prerequisite for this test");
+        }
+
+        super.testGetPartitionSplitsTableOfflinePartition();
+    }
+
+    @Override
+    public void testHideDeltaLakeTables()
+    {
+        assertThatThrownBy(super::testHideDeltaLakeTables)
+                .hasMessageMatching("(?s)\n" +
+                        "Expecting\n" +
+                        " <\\[.*\\b(\\w+.tmp_presto_test_presto_delta_lake_table_\\w+)\\b.*]>\n" +
+                        "not to contain\n" +
+                        " <\\[\\1]>\n" +
+                        "but found.*");
+
+        throw new SkipException("not supported");
+    }
+
+    @Test
+    public void testHiveViewTranslationError()
+    {
+        try (Transaction transaction = newTransaction()) {
+            assertThatThrownBy(() -> transaction.getMetadata().getView(newSession(), view))
+                    .isInstanceOf(HiveViewNotSupportedException.class)
+                    .hasMessageContaining("Hive views are not supported");
+
+            // TODO: combine this with tests for successful translation (currently in TestHiveViews product test)
+        }
     }
 }

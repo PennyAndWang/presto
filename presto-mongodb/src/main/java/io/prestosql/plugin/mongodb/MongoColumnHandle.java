@@ -28,8 +28,6 @@ import static java.util.Objects.requireNonNull;
 public class MongoColumnHandle
         implements ColumnHandle
 {
-    public static final String SAMPLE_WEIGHT_COLUMN_NAME = "presto_sample_weight";
-
     private final String name;
     private final Type type;
     private final boolean hidden;
@@ -65,7 +63,11 @@ public class MongoColumnHandle
 
     public ColumnMetadata toColumnMetadata()
     {
-        return new ColumnMetadata(name, type, null, hidden);
+        return ColumnMetadata.builder()
+                .setName(name)
+                .setType(type)
+                .setHidden(hidden)
+                .build();
     }
 
     public Document getDocument()

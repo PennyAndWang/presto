@@ -41,15 +41,10 @@ public final class OperatorValidator
                 validateOperatorSignature(operatorType, returnType, argumentTypes, 1);
                 break;
             case EQUAL:
-            case NOT_EQUAL:
+            case COMPARISON:
             case LESS_THAN:
             case LESS_THAN_OR_EQUAL:
-            case GREATER_THAN:
-            case GREATER_THAN_OR_EQUAL:
                 validateComparisonOperatorSignature(operatorType, returnType, argumentTypes, 2);
-                break;
-            case BETWEEN:
-                validateComparisonOperatorSignature(operatorType, returnType, argumentTypes, 3);
                 break;
             case CAST:
                 validateOperatorSignature(operatorType, returnType, argumentTypes, 1);
@@ -80,7 +75,7 @@ public final class OperatorValidator
     private static void validateOperatorSignature(OperatorType operatorType, TypeSignature returnType, List<TypeSignature> argumentTypes, int expectedArgumentCount)
     {
         String signature = formatSignature(operatorType, returnType, argumentTypes);
-        checkArgument(!returnType.getBase().equals(UnknownType.NAME), "%s operator return type can not be NULL: %s", operatorType, signature);
+        checkArgument(!returnType.getBase().equals(UnknownType.NAME), "%s operator return type cannot be NULL: %s", operatorType, signature);
         checkArgument(argumentTypes.size() == expectedArgumentCount, "%s operator must have exactly %s argument: %s", operatorType, expectedArgumentCount, signature);
     }
 

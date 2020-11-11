@@ -15,7 +15,7 @@ package io.prestosql.benchmark;
 
 import com.google.common.collect.ImmutableList;
 import io.prestosql.operator.OperatorFactory;
-import io.prestosql.operator.TopNOperator.TopNOperatorFactory;
+import io.prestosql.operator.TopNOperator;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.testing.LocalQueryRunner;
@@ -23,7 +23,7 @@ import io.prestosql.testing.LocalQueryRunner;
 import java.util.List;
 
 import static io.prestosql.benchmark.BenchmarkQueryRunner.createLocalQueryRunner;
-import static io.prestosql.spi.block.SortOrder.ASC_NULLS_LAST;
+import static io.prestosql.spi.connector.SortOrder.ASC_NULLS_LAST;
 
 public class Top100Benchmark
         extends AbstractSimpleOperatorBenchmark
@@ -38,13 +38,14 @@ public class Top100Benchmark
     {
         List<Type> tableScanTypes = getColumnTypes("orders", "totalprice");
         OperatorFactory tableScanOperator = createTableScanOperator(0, new PlanNodeId("test"), "orders", "totalprice");
-        TopNOperatorFactory topNOperator = new TopNOperatorFactory(
+        OperatorFactory topNOperator = TopNOperator.createOperatorFactory(
                 1,
                 new PlanNodeId("test"),
                 tableScanTypes,
                 100,
                 ImmutableList.of(0),
-                ImmutableList.of(ASC_NULLS_LAST));
+                ImmutableList.of(ASC_NULLS_LAST),
+                localQueryRunner.getTypeOperators());
         return ImmutableList.of(tableScanOperator, topNOperator);
     }
 

@@ -84,7 +84,7 @@ public class DynamicLifespanScheduler
         while (driverGroups.hasNext()) {
             for (int i = 0; i < allNodes.size() && driverGroups.hasNext(); i++) {
                 int driverGroupId = driverGroups.nextInt();
-                checkState(!bucketNodeMap.getAssignedNode(driverGroupId).isPresent());
+                checkState(bucketNodeMap.getAssignedNode(driverGroupId).isEmpty());
                 bucketNodeMap.assignBucketToNode(driverGroupId, allNodes.get(i));
                 scheduler.startLifespan(Lifespan.driverGroup(driverGroupId), partitionHandles.get(driverGroupId));
             }
@@ -117,7 +117,7 @@ public class DynamicLifespanScheduler
     }
 
     @Override
-    public SettableFuture schedule(SourceScheduler scheduler)
+    public SettableFuture<?> schedule(SourceScheduler scheduler)
     {
         // Return a new future even if newDriverGroupReady has not finished.
         // Returning the same SettableFuture instance could lead to ListenableFuture retaining too many listener objects.

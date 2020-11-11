@@ -14,24 +14,60 @@
 package io.prestosql.plugin.hive.metastore;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMultimap;
+import com.google.common.primitives.Longs;
+import io.airlift.slice.Slice;
+import io.prestosql.plugin.hive.HiveColumnHandle;
 import io.prestosql.plugin.hive.PartitionOfflineException;
 import io.prestosql.plugin.hive.TableOfflineException;
+import io.prestosql.plugin.hive.authentication.HiveIdentity;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.TableNotFoundException;
+import io.prestosql.spi.predicate.Domain;
+import io.prestosql.spi.predicate.TupleDomain;
+import io.prestosql.spi.type.BigintType;
+import io.prestosql.spi.type.BooleanType;
+import io.prestosql.spi.type.CharType;
+import io.prestosql.spi.type.DateType;
+import io.prestosql.spi.type.DecimalType;
+import io.prestosql.spi.type.Decimals;
+import io.prestosql.spi.type.DoubleType;
+import io.prestosql.spi.type.IntegerType;
+import io.prestosql.spi.type.RealType;
+import io.prestosql.spi.type.SmallintType;
+import io.prestosql.spi.type.TimestampType;
+import io.prestosql.spi.type.TinyintType;
+import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.VarcharType;
 import org.apache.hadoop.hive.common.FileUtils;
 import org.apache.hadoop.hive.metastore.ProtectMode;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.plugin.hive.HiveMetadata.AVRO_SCHEMA_URL_KEY;
 import static io.prestosql.plugin.hive.HiveSplitManager.PRESTO_OFFLINE;
+import static io.prestosql.plugin.hive.HiveStorageFormat.AVRO;
+import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.NUM_ROWS;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.prestosql.spi.predicate.TupleDomain.withColumnDomains;
+import static io.prestosql.spi.security.PrincipalType.USER;
+import static io.prestosql.spi.type.Chars.padSpaces;
+import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 import static org.apache.hadoop.hive.metastore.ColumnType.typeToThriftType;
 import static org.apache.hadoop.hive.metastore.ProtectMode.getProtectModeFromString;
@@ -48,11 +84,11 @@ import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_
 import static org.apache.hadoop.hive.serde.serdeConstants.SERIALIZATION_DDL;
 import static org.apache.hadoop.hive.serde.serdeConstants.SERIALIZATION_LIB;
 
-public class MetastoreUtil
+public final class MetastoreUtil
 {
-    private MetastoreUtil()
-    {
-    }
+    private static final String HIVE_PARTITION_VALUE_WILDCARD = "";
+
+    private MetastoreUtil() {}
 
     public static Properties getHiveSchema(Table table)
     {
@@ -177,18 +213,34 @@ public class MetastoreUtil
         return getProtectMode(table.getParameters());
     }
 
-    public static String makePartName(List<Column> partitionColumns, List<String> values)
+    public static boolean isAvroTableWithSchemaSet(Table table)
     {
-        checkArgument(partitionColumns.size() == values.size(), "Partition value count does not match the partition column count");
-        checkArgument(values.stream().allMatch(Objects::nonNull), "partitionValue must not have null elements");
+        return AVRO.getSerDe().equals(table.getStorage().getStorageFormat().getSerDeNullable()) &&
+                (table.getParameters().get(AVRO_SCHEMA_URL_KEY) != null ||
+                        (table.getStorage().getSerdeParameters().get(AVRO_SCHEMA_URL_KEY) != null));
+    }
 
-        List<String> partitionColumnNames = partitionColumns.stream().map(Column::getName).collect(toList());
-        return FileUtils.makePartName(partitionColumnNames, values);
+    public static String makePartitionName(Table table, Partition partition)
+    {
+        return makePartitionName(table.getPartitionColumns(), partition.getValues());
+    }
+
+    public static String makePartitionName(List<Column> partitionColumns, List<String> values)
+    {
+        return toPartitionName(partitionColumns.stream().map(Column::getName).collect(toList()), values);
+    }
+
+    public static String toPartitionName(List<String> names, List<String> values)
+    {
+        checkArgument(names.size() == values.size(), "partition value count must match partition column count");
+        checkArgument(values.stream().allMatch(Objects::nonNull), "partition value must not be null");
+
+        return FileUtils.makePartName(names, values);
     }
 
     public static String getPartitionLocation(Table table, Optional<Partition> partition)
     {
-        if (!partition.isPresent()) {
+        if (partition.isEmpty()) {
             return table.getStorage().getLocation();
         }
         return partition.get().getStorage().getLocation();
@@ -246,9 +298,9 @@ public class MetastoreUtil
         }
     }
 
-    public static void verifyCanDropColumn(HiveMetastore metastore, String databaseName, String tableName, String columnName)
+    public static void verifyCanDropColumn(HiveMetastore metastore, HiveIdentity identity, String databaseName, String tableName, String columnName)
     {
-        Table table = metastore.getTable(databaseName, tableName)
+        Table table = metastore.getTable(identity, databaseName, tableName)
                 .orElseThrow(() -> new TableNotFoundException(new SchemaTableName(databaseName, tableName)));
 
         if (table.getPartitionColumns().stream().anyMatch(column -> column.getName().equals(columnName))) {
@@ -257,5 +309,158 @@ public class MetastoreUtil
         if (table.getDataColumns().size() <= 1) {
             throw new PrestoException(NOT_SUPPORTED, "Cannot drop the only non-partition column in a table");
         }
+    }
+
+    public static PrincipalPrivileges buildInitialPrivilegeSet(String tableOwner)
+    {
+        HivePrincipal owner = new HivePrincipal(USER, tableOwner);
+        return new PrincipalPrivileges(
+                ImmutableMultimap.<String, HivePrivilegeInfo>builder()
+                        .put(tableOwner, new HivePrivilegeInfo(HivePrivilegeInfo.HivePrivilege.SELECT, true, owner, owner))
+                        .put(tableOwner, new HivePrivilegeInfo(HivePrivilegeInfo.HivePrivilege.INSERT, true, owner, owner))
+                        .put(tableOwner, new HivePrivilegeInfo(HivePrivilegeInfo.HivePrivilege.UPDATE, true, owner, owner))
+                        .put(tableOwner, new HivePrivilegeInfo(HivePrivilegeInfo.HivePrivilege.DELETE, true, owner, owner))
+                        .build(),
+                ImmutableMultimap.of());
+    }
+
+    public static boolean isPartitionKeyFilterFalse(TupleDomain<String> partitionKeysFilter)
+    {
+        return partitionKeysFilter.isNone() || partitionKeysFilter.getDomains().get().values().stream().anyMatch(Domain::isNone);
+    }
+
+    /**
+     * @param assumeCanonicalPartitionKeys allow conversion of non-char types (eg BIGINT, timestamp) to canonical string formats. If false, non-char types will be replaced
+     * with the wildcard
+     * @return the Domain for each partition key to either the wildcard or an equals check.
+     * TupleDomain.none() or any column's Domain.isNone() -> Optional.empty()
+     */
+    public static Optional<List<String>> partitionKeyFilterToStringList(List<String> columnNames, TupleDomain<String> partitionKeysFilter, boolean assumeCanonicalPartitionKeys)
+    {
+        if (isPartitionKeyFilterFalse(partitionKeysFilter)) {
+            return Optional.empty();
+        }
+
+        checkArgument(partitionKeysFilter.getDomains().isPresent());
+
+        Map<String, Domain> domainMap = partitionKeysFilter.getDomains().orElse(ImmutableMap.of());
+        List<String> partitionList = columnNames.stream()
+                .map(cn -> domainToString(domainMap.get(cn), assumeCanonicalPartitionKeys, HIVE_PARTITION_VALUE_WILDCARD))
+                .collect(toImmutableList());
+        return Optional.of(partitionList);
+    }
+
+    /**
+     * @param domain - domain expression for the column. null => TupleDomain.all()
+     * @param assumeCanonicalPartitionKeys
+     * @param partitionWildcardString wildcard
+     * @return string for scalar values
+     */
+    private static String domainToString(Domain domain, boolean assumeCanonicalPartitionKeys, String partitionWildcardString)
+    {
+        if (domain != null && domain.isNullableSingleValue()) {
+            return sqlScalarToStringForParts(domain.getType(), domain.getNullableSingleValue(), assumeCanonicalPartitionKeys, partitionWildcardString);
+        }
+
+        return partitionWildcardString;
+    }
+
+    public static boolean canConvertSqlTypeToStringForParts(Type type, boolean assumeCanonicalPartitionKeys)
+    {
+        return !(type instanceof TimestampType) && (type instanceof CharType || type instanceof VarcharType || assumeCanonicalPartitionKeys);
+    }
+
+    /**
+     * @return canonical string representation of a given value according to its type. If there isn't a valid conversion, returns ""
+     */
+    public static String sqlScalarToStringForParts(Type type, Object value, boolean assumeCanonicalPartitionKeys, String partitionWildcardString)
+    {
+        if (!canConvertSqlTypeToStringForParts(type, assumeCanonicalPartitionKeys)) {
+            return partitionWildcardString;
+        }
+
+        return sqlScalarToString(type, value, HIVE_PARTITION_VALUE_WILDCARD);
+    }
+
+    /**
+     * @return canonical string representation of a given value according to its type.
+     * @throws PrestoException if the type is not supported
+     */
+    public static String sqlScalarToString(Type type, Object value, String nullString)
+    {
+        if (value == null) {
+            return nullString;
+        }
+        else if (type instanceof CharType) {
+            Slice slice = (Slice) value;
+            return padSpaces(slice, (CharType) type).toStringUtf8();
+        }
+        else if (type instanceof VarcharType) {
+            Slice slice = (Slice) value;
+            return slice.toStringUtf8();
+        }
+        else if (type instanceof DecimalType && !((DecimalType) type).isShort()) {
+            Slice slice = (Slice) value;
+            return Decimals.toString(slice, ((DecimalType) type).getScale());
+        }
+        else if (type instanceof DecimalType && ((DecimalType) type).isShort()) {
+            return Decimals.toString((long) value, ((DecimalType) type).getScale());
+        }
+        else if (type instanceof DateType) {
+            DateTimeFormatter dateTimeFormatter = ISODateTimeFormat.date().withZoneUTC();
+            return dateTimeFormatter.print(TimeUnit.DAYS.toMillis((long) value));
+        }
+        else if (type instanceof TimestampType) {
+            // we throw on this type as we don't have timezone. Callers should not ask for this conversion type, but document for possible future work (?)
+            throw new PrestoException(NOT_SUPPORTED, "TimestampType conversion to scalar expressions is not supported");
+        }
+        else if (type instanceof TinyintType
+                || type instanceof SmallintType
+                || type instanceof IntegerType
+                || type instanceof BigintType
+                || type instanceof DoubleType
+                || type instanceof RealType
+                || type instanceof BooleanType) {
+            return value.toString();
+        }
+        else {
+            throw new PrestoException(NOT_SUPPORTED, format("Unsupported partition key type: %s", type.getDisplayName()));
+        }
+    }
+
+    /**
+     * This method creates a TupleDomain for each partitionKey specified
+     *
+     * @return filtered version of relevant Domains in effectivePredicate.
+     */
+    public static TupleDomain<String> computePartitionKeyFilter(List<HiveColumnHandle> partitionKeys, TupleDomain<HiveColumnHandle> effectivePredicate)
+    {
+        checkArgument(effectivePredicate.getDomains().isPresent());
+
+        Map<String, Domain> domains = new LinkedHashMap<>();
+        for (HiveColumnHandle partitionKey : partitionKeys) {
+            String name = partitionKey.getName();
+            Domain domain = effectivePredicate.getDomains().get().get(partitionKey);
+            if (domain != null) {
+                domains.put(name, domain);
+            }
+        }
+
+        return withColumnDomains(domains);
+    }
+
+    public static Map<String, String> adjustRowCount(Map<String, String> parameters, String description, long rowCountAdjustment)
+    {
+        String existingRowCount = parameters.get(NUM_ROWS);
+        if (existingRowCount == null) {
+            return parameters;
+        }
+        Long count = Longs.tryParse(existingRowCount);
+        requireNonNull(count, format("For %s, the existing row count (%s) is not a digit string", description, existingRowCount));
+        long newRowCount = count + rowCountAdjustment;
+        checkArgument(newRowCount >= 0, "For %s, the subtracted row count (%s) is less than zero, existing count %s, rows deleted %d", description, newRowCount, existingRowCount, rowCountAdjustment);
+        Map<String, String> copiedParameters = new HashMap<>(parameters);
+        copiedParameters.put(NUM_ROWS, String.valueOf(newRowCount));
+        return ImmutableMap.copyOf(copiedParameters);
     }
 }

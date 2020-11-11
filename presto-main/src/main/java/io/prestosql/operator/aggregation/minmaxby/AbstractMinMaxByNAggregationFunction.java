@@ -15,14 +15,15 @@ package io.prestosql.operator.aggregation.minmaxby;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.bytecode.DynamicClassLoader;
-import io.prestosql.metadata.BoundVariables;
-import io.prestosql.metadata.FunctionRegistry;
+import io.prestosql.metadata.FunctionArgumentDefinition;
+import io.prestosql.metadata.FunctionBinding;
+import io.prestosql.metadata.FunctionMetadata;
+import io.prestosql.metadata.Signature;
 import io.prestosql.metadata.SqlAggregationFunction;
 import io.prestosql.operator.aggregation.AbstractMinMaxNAggregationFunction;
 import io.prestosql.operator.aggregation.AccumulatorCompiler;
 import io.prestosql.operator.aggregation.AggregationMetadata;
 import io.prestosql.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
-import io.prestosql.operator.aggregation.BlockComparator;
 import io.prestosql.operator.aggregation.GenericAccumulatorFactoryBinder;
 import io.prestosql.operator.aggregation.InternalAggregationFunction;
 import io.prestosql.operator.aggregation.TypedKeyValueHeap;
@@ -30,15 +31,17 @@ import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.type.ArrayType;
-import io.prestosql.spi.type.StandardTypes;
 import io.prestosql.spi.type.Type;
-import io.prestosql.spi.type.TypeManager;
+import io.prestosql.spi.type.TypeSignature;
+import io.prestosql.type.BlockTypeOperators.BlockPositionComparison;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Function;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.metadata.FunctionKind.AGGREGATE;
 import static io.prestosql.metadata.Signature.orderableTypeParameter;
 import static io.prestosql.metadata.Signature.typeVariable;
 import static io.prestosql.operator.aggregation.AggregationMetadata.ParameterMetadata.ParameterType.BLOCK_INDEX;
@@ -49,7 +52,6 @@ import static io.prestosql.operator.aggregation.AggregationMetadata.ParameterMet
 import static io.prestosql.operator.aggregation.AggregationUtils.generateAggregationName;
 import static io.prestosql.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.prestosql.spi.type.BigintType.BIGINT;
-import static io.prestosql.spi.type.TypeSignature.parseTypeSignature;
 import static io.prestosql.util.Failures.checkCondition;
 import static io.prestosql.util.Reflection.methodHandle;
 import static java.lang.Math.toIntExact;
@@ -58,34 +60,57 @@ import static java.util.Objects.requireNonNull;
 public abstract class AbstractMinMaxByNAggregationFunction
         extends SqlAggregationFunction
 {
-    private static final MethodHandle INPUT_FUNCTION = methodHandle(AbstractMinMaxByNAggregationFunction.class, "input", BlockComparator.class, Type.class, Type.class, MinMaxByNState.class, Block.class, Block.class, int.class, long.class);
+    private static final MethodHandle INPUT_FUNCTION = methodHandle(AbstractMinMaxByNAggregationFunction.class, "input", BlockPositionComparison.class, Type.class, Type.class, MinMaxByNState.class, Block.class, Block.class, int.class, long.class);
     private static final MethodHandle COMBINE_FUNCTION = methodHandle(AbstractMinMaxByNAggregationFunction.class, "combine", MinMaxByNState.class, MinMaxByNState.class);
     private static final MethodHandle OUTPUT_FUNCTION = methodHandle(AbstractMinMaxByNAggregationFunction.class, "output", ArrayType.class, MinMaxByNState.class, BlockBuilder.class);
     private static final long MAX_NUMBER_OF_VALUES = 10_000;
 
     private final String name;
-    private final Function<Type, BlockComparator> typeToComparator;
+    private final Function<Type, BlockPositionComparison> typeToComparison;
 
-    protected AbstractMinMaxByNAggregationFunction(String name, Function<Type, BlockComparator> typeToComparator)
+    protected AbstractMinMaxByNAggregationFunction(String name, Function<Type, BlockPositionComparison> typeToComparison, String description)
     {
-        super(name,
-                ImmutableList.of(typeVariable("V"), orderableTypeParameter("K")),
-                ImmutableList.of(),
-                parseTypeSignature("array(V)"),
-                ImmutableList.of(parseTypeSignature("V"), parseTypeSignature("K"), parseTypeSignature(StandardTypes.BIGINT)));
+        super(
+                new FunctionMetadata(
+                        new Signature(
+                                name,
+                                ImmutableList.of(typeVariable("V"), orderableTypeParameter("K")),
+                                ImmutableList.of(),
+                                TypeSignature.arrayType(new TypeSignature("V")),
+                                ImmutableList.of(new TypeSignature("V"), new TypeSignature("K"), BIGINT.getTypeSignature()),
+                                false),
+                        true,
+                        ImmutableList.of(
+                                new FunctionArgumentDefinition(true),
+                                new FunctionArgumentDefinition(false),
+                                new FunctionArgumentDefinition(false)),
+                        false,
+                        true,
+                        description,
+                        AGGREGATE),
+                true,
+                false);
         this.name = requireNonNull(name, "name is null");
-        this.typeToComparator = requireNonNull(typeToComparator, "typeToComparator is null");
+        this.typeToComparison = requireNonNull(typeToComparison, "typeToComparison is null");
     }
 
     @Override
-    public InternalAggregationFunction specialize(BoundVariables boundVariables, int arity, TypeManager typeManager, FunctionRegistry functionRegistry)
+    public List<TypeSignature> getIntermediateTypes(FunctionBinding functionBinding)
     {
-        Type keyType = boundVariables.getTypeVariable("K");
-        Type valueType = boundVariables.getTypeVariable("V");
+        Type keyType = functionBinding.getTypeVariable("K");
+        Type valueType = functionBinding.getTypeVariable("V");
+        return ImmutableList.of(new MinMaxByNStateSerializer(typeToComparison.apply(keyType), keyType, valueType).getSerializedType().getTypeSignature());
+    }
+
+    @Override
+    public InternalAggregationFunction specialize(FunctionBinding functionBinding)
+    {
+        Type keyType = functionBinding.getTypeVariable("K");
+        Type valueType = functionBinding.getTypeVariable("V");
         return generateAggregation(valueType, keyType);
     }
 
-    public static void input(BlockComparator comparator, Type valueType, Type keyType, MinMaxByNState state, Block value, Block key, int blockIndex, long n)
+    public static void input(BlockPositionComparison comparison, Type valueType, Type keyType, MinMaxByNState state, Block value, Block key, int blockIndex, long n)
     {
         TypedKeyValueHeap heap = state.getTypedKeyValueHeap();
         if (heap == null) {
@@ -93,7 +118,7 @@ public abstract class AbstractMinMaxByNAggregationFunction
                 throw new PrestoException(INVALID_FUNCTION_ARGUMENT, "third argument of max_by/min_by must be a positive integer");
             }
             checkCondition(n <= MAX_NUMBER_OF_VALUES, INVALID_FUNCTION_ARGUMENT, "third argument of max_by/min_by must be less than or equal to %s; found %s", MAX_NUMBER_OF_VALUES, n);
-            heap = new TypedKeyValueHeap(comparator, keyType, valueType, toIntExact(n));
+            heap = new TypedKeyValueHeap(comparison, keyType, valueType, toIntExact(n));
             state.setTypedKeyValueHeap(heap);
         }
 
@@ -146,9 +171,9 @@ public abstract class AbstractMinMaxByNAggregationFunction
     {
         DynamicClassLoader classLoader = new DynamicClassLoader(AbstractMinMaxNAggregationFunction.class.getClassLoader());
 
-        BlockComparator comparator = typeToComparator.apply(keyType);
+        BlockPositionComparison comparison = typeToComparison.apply(keyType);
         List<Type> inputTypes = ImmutableList.of(valueType, keyType, BIGINT);
-        MinMaxByNStateSerializer stateSerializer = new MinMaxByNStateSerializer(comparator, keyType, valueType);
+        MinMaxByNStateSerializer stateSerializer = new MinMaxByNStateSerializer(comparison, keyType, valueType);
         Type intermediateType = stateSerializer.getSerializedType();
         ArrayType outputType = new ArrayType(valueType);
 
@@ -162,7 +187,8 @@ public abstract class AbstractMinMaxByNAggregationFunction
         AggregationMetadata metadata = new AggregationMetadata(
                 generateAggregationName(name, valueType.getTypeSignature(), inputTypes.stream().map(Type::getTypeSignature).collect(toImmutableList())),
                 inputParameterMetadata,
-                INPUT_FUNCTION.bindTo(comparator).bindTo(valueType).bindTo(keyType),
+                INPUT_FUNCTION.bindTo(comparison).bindTo(valueType).bindTo(keyType),
+                Optional.empty(),
                 COMBINE_FUNCTION,
                 OUTPUT_FUNCTION.bindTo(outputType),
                 ImmutableList.of(new AccumulatorStateDescriptor(
@@ -172,6 +198,6 @@ public abstract class AbstractMinMaxByNAggregationFunction
                 outputType);
 
         GenericAccumulatorFactoryBinder factory = AccumulatorCompiler.generateAccumulatorFactoryBinder(metadata, classLoader);
-        return new InternalAggregationFunction(name, inputTypes, ImmutableList.of(intermediateType), outputType, true, false, factory);
+        return new InternalAggregationFunction(name, inputTypes, ImmutableList.of(intermediateType), outputType, factory);
     }
 }

@@ -32,9 +32,11 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static io.prestosql.spi.type.TypeUtils.isFloatingPointNaN;
 import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toUnmodifiableList;
 
 /**
  * A set containing zero or more Ranges of the same type over a continuous space of possible values.
@@ -156,8 +158,33 @@ public final class SortedRangeSet
     }
 
     @Override
+    public boolean isDiscreteSet()
+    {
+        for (Range range : lowIndexedRanges.values()) {
+            if (!range.isSingleValue()) {
+                return false;
+            }
+        }
+        return !isNone();
+    }
+
+    @Override
+    public List<Object> getDiscreteSet()
+    {
+        if (!isDiscreteSet()) {
+            throw new IllegalStateException("SortedRangeSet is not a discrete set");
+        }
+        return lowIndexedRanges.values().stream()
+                .map(Range::getSingleValue)
+                .collect(toUnmodifiableList());
+    }
+
+    @Override
     public boolean containsValue(Object value)
     {
+        if (isFloatingPointNaN(type, value)) {
+            return isAll();
+        }
         return includesMarker(Marker.exactly(type, value));
     }
 
@@ -173,7 +200,7 @@ public final class SortedRangeSet
     public Range getSpan()
     {
         if (lowIndexedRanges.isEmpty()) {
-            throw new IllegalStateException("Can not get span if no ranges exist");
+            throw new IllegalStateException("Cannot get span if no ranges exist");
         }
         return lowIndexedRanges.firstEntry().getValue().span(lowIndexedRanges.lastEntry().getValue());
     }
@@ -229,8 +256,8 @@ public final class SortedRangeSet
 
         Builder builder = new Builder(type);
 
-        Iterator<Range> iterator1 = getOrderedRanges().iterator();
-        Iterator<Range> iterator2 = otherRangeSet.getOrderedRanges().iterator();
+        Iterator<Range> iterator1 = lowIndexedRanges.values().iterator();
+        Iterator<Range> iterator2 = otherRangeSet.lowIndexedRanges.values().iterator();
 
         if (iterator1.hasNext() && iterator2.hasNext()) {
             Range range1 = iterator1.next();
@@ -260,12 +287,47 @@ public final class SortedRangeSet
     }
 
     @Override
+    public boolean overlaps(ValueSet other)
+    {
+        SortedRangeSet otherRangeSet = checkCompatibility(other);
+
+        Iterator<Range> iterator1 = lowIndexedRanges.values().iterator();
+        Iterator<Range> iterator2 = otherRangeSet.lowIndexedRanges.values().iterator();
+
+        if (iterator1.hasNext() && iterator2.hasNext()) {
+            Range range1 = iterator1.next();
+            Range range2 = iterator2.next();
+
+            while (true) {
+                if (range1.overlaps(range2)) {
+                    return true;
+                }
+
+                if (range1.getHigh().compareTo(range2.getHigh()) <= 0) {
+                    if (!iterator1.hasNext()) {
+                        break;
+                    }
+                    range1 = iterator1.next();
+                }
+                else {
+                    if (!iterator2.hasNext()) {
+                        break;
+                    }
+                    range2 = iterator2.next();
+                }
+            }
+        }
+
+        return false;
+    }
+
+    @Override
     public SortedRangeSet union(ValueSet other)
     {
         SortedRangeSet otherRangeSet = checkCompatibility(other);
         return new Builder(type)
-                .addAll(this.getOrderedRanges())
-                .addAll(otherRangeSet.getOrderedRanges())
+                .addAll(this.lowIndexedRanges.values())
+                .addAll(otherRangeSet.lowIndexedRanges.values())
                 .build();
     }
 
@@ -273,9 +335,9 @@ public final class SortedRangeSet
     public SortedRangeSet union(Collection<ValueSet> valueSets)
     {
         Builder builder = new Builder(type);
-        builder.addAll(this.getOrderedRanges());
+        builder.addAll(this.lowIndexedRanges.values());
         for (ValueSet valueSet : valueSets) {
-            builder.addAll(checkCompatibility(valueSet).getOrderedRanges());
+            builder.addAll(checkCompatibility(valueSet).lowIndexedRanges.values());
         }
         return builder.build();
     }
@@ -348,8 +410,14 @@ public final class SortedRangeSet
         if (obj == null || getClass() != obj.getClass()) {
             return false;
         }
-        final SortedRangeSet other = (SortedRangeSet) obj;
+        SortedRangeSet other = (SortedRangeSet) obj;
         return Objects.equals(this.lowIndexedRanges, other.lowIndexedRanges);
+    }
+
+    @Override
+    public String toString()
+    {
+        return lowIndexedRanges.values().toString();
     }
 
     @Override
@@ -395,7 +463,7 @@ public final class SortedRangeSet
 
         SortedRangeSet build()
         {
-            Collections.sort(ranges, Comparator.comparing(Range::getLow));
+            ranges.sort(Comparator.comparing(Range::getLow));
 
             NavigableMap<Marker, Range> result = new TreeMap<>();
 

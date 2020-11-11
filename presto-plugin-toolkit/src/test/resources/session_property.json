@@ -1,5 +1,5 @@
 {
-  "sessionProperties": [
+  "session_properties": [
     {
       "user": "admin",
       "property": ".*",
@@ -17,6 +17,11 @@
     {
       "user": "bob",
       "property": "safe",
+      "allow": true
+    },
+    {
+      "group": "staff",
+      "property": "staff",
       "allow": true
     }
   ]

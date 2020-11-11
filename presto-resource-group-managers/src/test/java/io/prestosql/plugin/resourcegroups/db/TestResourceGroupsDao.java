@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 import static io.airlift.json.JsonCodec.jsonCodec;
@@ -59,7 +60,7 @@ public class TestResourceGroupsDao
 
     static H2ResourceGroupsDao setup(String prefix)
     {
-        DbResourceGroupConfig config = new DbResourceGroupConfig().setConfigDbUrl("jdbc:h2:mem:test_" + prefix + System.nanoTime());
+        DbResourceGroupConfig config = new DbResourceGroupConfig().setConfigDbUrl("jdbc:h2:mem:test_" + prefix + System.nanoTime() + ThreadLocalRandom.current().nextLong());
         return new H2DaoProvider(config).get();
     }
 
@@ -80,7 +81,7 @@ public class TestResourceGroupsDao
         dao.insertResourceGroup(2, "bi", "50%", 50, 50, 50, null, null, null, null, null, 1L, ENVIRONMENT);
         List<ResourceGroupSpecBuilder> records = dao.getResourceGroups(ENVIRONMENT);
         assertEquals(records.size(), 2);
-        map.put(1L, new ResourceGroupSpecBuilder(1, new ResourceGroupNameTemplate("global"), "100%", 100, Optional.of(100), 100, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), null));
+        map.put(1L, new ResourceGroupSpecBuilder(1, new ResourceGroupNameTemplate("global"), "100%", 100, Optional.of(100), 100, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
         map.put(2L, new ResourceGroupSpecBuilder(2, new ResourceGroupNameTemplate("bi"), "50%", 50, Optional.of(50), 50, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(1L)));
         compareResourceGroups(map, records);
     }

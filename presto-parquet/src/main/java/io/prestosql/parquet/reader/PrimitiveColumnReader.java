@@ -25,21 +25,19 @@ import io.prestosql.parquet.RichColumnDescriptor;
 import io.prestosql.parquet.dictionary.Dictionary;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.BlockBuilder;
-import io.prestosql.spi.type.DecimalType;
 import io.prestosql.spi.type.Type;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
 import org.apache.parquet.bytes.ByteBufferInputStream;
 import org.apache.parquet.bytes.BytesUtils;
-import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.column.values.rle.RunLengthBitPackingHybridDecoder;
 import org.apache.parquet.io.ParquetDecodingException;
+import org.apache.parquet.schema.OriginalType;
+import org.joda.time.DateTimeZone;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.Optional;
-import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -80,17 +78,26 @@ public abstract class PrimitiveColumnReader
         return ParquetTypeUtils.isValueNull(columnDescriptor.isRequired(), definitionLevel, columnDescriptor.getMaxDefinitionLevel());
     }
 
-    public static PrimitiveColumnReader createReader(RichColumnDescriptor descriptor)
+    public static PrimitiveColumnReader createReader(RichColumnDescriptor descriptor, DateTimeZone timeZone)
     {
-        switch (descriptor.getType()) {
+        switch (descriptor.getPrimitiveType().getPrimitiveTypeName()) {
             case BOOLEAN:
                 return new BooleanColumnReader(descriptor);
             case INT32:
                 return createDecimalColumnReader(descriptor).orElse(new IntColumnReader(descriptor));
             case INT64:
+                if (descriptor.getPrimitiveType().getOriginalType() == OriginalType.TIME_MICROS) {
+                    return new TimeMicrosColumnReader(descriptor);
+                }
+                if (descriptor.getPrimitiveType().getOriginalType() == OriginalType.TIMESTAMP_MICROS) {
+                    return new TimestampMicrosColumnReader(descriptor);
+                }
+                if (descriptor.getPrimitiveType().getOriginalType() == OriginalType.TIMESTAMP_MILLIS) {
+                    return new Int64TimestampMillisColumnReader(descriptor);
+                }
                 return createDecimalColumnReader(descriptor).orElse(new LongColumnReader(descriptor));
             case INT96:
-                return new TimestampColumnReader(descriptor);
+                return new TimestampColumnReader(descriptor, timeZone);
             case FLOAT:
                 return new FloatColumnReader(descriptor);
             case DOUBLE:
@@ -101,18 +108,14 @@ public abstract class PrimitiveColumnReader
                 return createDecimalColumnReader(descriptor)
                         .orElseThrow(() -> new PrestoException(NOT_SUPPORTED, " type FIXED_LEN_BYTE_ARRAY supported as DECIMAL; got " + descriptor.getPrimitiveType().getOriginalType()));
             default:
-                throw new PrestoException(NOT_SUPPORTED, "Unsupported parquet type: " + descriptor.getType());
+                throw new PrestoException(NOT_SUPPORTED, "Unsupported parquet type: " + descriptor.getPrimitiveType().getPrimitiveTypeName());
         }
     }
 
     private static Optional<PrimitiveColumnReader> createDecimalColumnReader(RichColumnDescriptor descriptor)
     {
-        Optional<Type> type = createDecimalType(descriptor);
-        if (type.isPresent()) {
-            DecimalType decimalType = (DecimalType) type.get();
-            return Optional.of(DecimalColumnReaderFactory.createReader(descriptor, decimalType.getPrecision(), decimalType.getScale()));
-        }
-        return Optional.empty();
+        return createDecimalType(descriptor)
+                .map(decimalType -> DecimalColumnReaderFactory.createReader(descriptor, decimalType));
     }
 
     public PrimitiveColumnReader(RichColumnDescriptor columnDescriptor)
@@ -152,13 +155,7 @@ public abstract class PrimitiveColumnReader
         nextBatchSize = batchSize;
     }
 
-    public ColumnDescriptor getDescriptor()
-    {
-        return columnDescriptor;
-    }
-
     public ColumnChunk readPrimitive(Field field)
-            throws IOException
     {
         IntList definitionLevels = new IntArrayList();
         IntList repetitionLevels = new IntArrayList();
@@ -182,7 +179,7 @@ public abstract class PrimitiveColumnReader
 
     private void readValues(BlockBuilder blockBuilder, int valuesToRead, Type type, IntList definitionLevels, IntList repetitionLevels)
     {
-        processValues(valuesToRead, ignored -> {
+        processValues(valuesToRead, () -> {
             readValue(blockBuilder, type);
             definitionLevels.add(definitionLevel);
             repetitionLevels.add(repetitionLevel);
@@ -191,10 +188,10 @@ public abstract class PrimitiveColumnReader
 
     private void skipValues(int valuesToRead)
     {
-        processValues(valuesToRead, ignored -> skipValue());
+        processValues(valuesToRead, this::skipValue);
     }
 
-    private void processValues(int valuesToRead, Consumer<Void> valueConsumer)
+    private void processValues(int valuesToRead, Runnable valueReader)
     {
         if (definitionLevel == EMPTY_LEVEL_VALUE && repetitionLevel == EMPTY_LEVEL_VALUE) {
             definitionLevel = definitionReader.readLevel();
@@ -203,7 +200,7 @@ public abstract class PrimitiveColumnReader
         int valueCount = 0;
         for (int i = 0; i < valuesToRead; i++) {
             do {
-                valueConsumer.accept(null);
+                valueReader.run();
                 valueCount++;
                 if (valueCount == remainingValueCountInPage) {
                     updateValueCounts(valueCount);
@@ -295,7 +292,7 @@ public abstract class PrimitiveColumnReader
         if (maxLevel == 0) {
             return new LevelNullReader();
         }
-        return new LevelRLEReader(new RunLengthBitPackingHybridDecoder(BytesUtils.getWidthFromMaxInt(maxLevel), new ByteArrayInputStream(slice.getBytes())));
+        return new LevelRLEReader(new RunLengthBitPackingHybridDecoder(BytesUtils.getWidthFromMaxInt(maxLevel), slice.getInput()));
     }
 
     private ValuesReader initDataReader(ParquetEncoding dataEncoding, int valueCount, ByteBufferInputStream in)

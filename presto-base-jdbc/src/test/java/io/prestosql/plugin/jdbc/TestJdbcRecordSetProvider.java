@@ -32,6 +32,7 @@ import org.testng.annotations.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -45,11 +46,8 @@ import static io.prestosql.testing.TestingConnectorSession.SESSION;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 
-@Test
 public class TestJdbcRecordSetProvider
 {
-    private static final JdbcIdentity IDENTITY = new JdbcIdentity("user", ImmutableMap.of());
-
     private TestingDatabase database;
     private JdbcClient jdbcClient;
     private JdbcSplit split;
@@ -182,13 +180,13 @@ public class TestJdbcRecordSetProvider
     {
         jdbcTableHandle = new JdbcTableHandle(
                 jdbcTableHandle.getSchemaTableName(),
-                jdbcTableHandle.getCatalogName(),
-                jdbcTableHandle.getSchemaName(),
-                jdbcTableHandle.getTableName(),
+                jdbcTableHandle.getRemoteTableName(),
                 domain,
-                OptionalLong.empty());
+                Optional.empty(),
+                OptionalLong.empty(),
+                Optional.empty());
 
-        ConnectorSplitSource splits = jdbcClient.getSplits(IDENTITY, jdbcTableHandle);
+        ConnectorSplitSource splits = jdbcClient.getSplits(SESSION, jdbcTableHandle);
         JdbcSplit split = (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(NOT_PARTITIONED, 1000)).getSplits());
 
         ConnectorTransactionHandle transaction = new JdbcTransactionHandle();

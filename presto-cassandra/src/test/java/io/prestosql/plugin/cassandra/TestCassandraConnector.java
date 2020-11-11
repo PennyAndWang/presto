@@ -26,18 +26,19 @@ import io.prestosql.spi.connector.ConnectorSplit;
 import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
 import io.prestosql.spi.connector.ConnectorTableHandle;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
-import io.prestosql.spi.connector.ConnectorTableLayoutResult;
 import io.prestosql.spi.connector.ConnectorTableMetadata;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
 import io.prestosql.spi.connector.Constraint;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.RecordCursor;
 import io.prestosql.spi.connector.SchemaNotFoundException;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.SchemaTablePrefix;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.VarcharType;
 import io.prestosql.testing.TestingConnectorContext;
 import io.prestosql.testing.TestingConnectorSession;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -47,7 +48,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.testing.Assertions.assertInstanceOf;
 import static io.prestosql.plugin.cassandra.CassandraTestingUtils.TABLE_ALL_TYPES;
@@ -56,13 +56,13 @@ import static io.prestosql.spi.connector.ConnectorSplitManager.SplitSchedulingSt
 import static io.prestosql.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
+import static io.prestosql.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.RealType.REAL;
 import static io.prestosql.spi.type.TimeZoneKey.UTC_KEY;
-import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
+import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
-import static io.prestosql.spi.type.Varchars.isVarcharType;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.testng.Assert.assertEquals;
@@ -70,25 +70,16 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
-@Test(singleThreaded = true)
 public class TestCassandraConnector
 {
     protected static final String INVALID_DATABASE = "totally_invalid_database";
     private static final Date DATE = new Date();
-    private static final ConnectorSession SESSION = new TestingConnectorSession(
-            "user",
-            Optional.of("test"),
-            Optional.empty(),
-            UTC_KEY,
-            ENGLISH,
-            System.currentTimeMillis(),
-            new CassandraSessionProperties(new CassandraClientConfig()).getSessionProperties(),
-            ImmutableMap.of(),
-            true);
+    private static final ConnectorSession SESSION = TestingConnectorSession.builder()
+            .setPropertyMetadata(new CassandraSessionProperties(new CassandraClientConfig()).getSessionProperties())
+            .build();
+    private CassandraServer server;
     protected String database;
     protected SchemaTableName table;
-    protected SchemaTableName tableUnpartitioned;
-    protected SchemaTableName invalidTable;
     private ConnectorMetadata metadata;
     private ConnectorSplitManager splitManager;
     private ConnectorRecordSetProvider recordSetProvider;
@@ -97,16 +88,16 @@ public class TestCassandraConnector
     public void setup()
             throws Exception
     {
-        EmbeddedCassandra.start();
+        this.server = new CassandraServer();
 
         String keyspace = "test_connector";
-        createTestTables(EmbeddedCassandra.getSession(), keyspace, DATE);
+        createTestTables(server.getSession(), keyspace, DATE);
 
         CassandraConnectorFactory connectorFactory = new CassandraConnectorFactory();
 
         Connector connector = connectorFactory.create("test", ImmutableMap.of(
-                "cassandra.contact-points", EmbeddedCassandra.getHost(),
-                "cassandra.native-protocol-port", Integer.toString(EmbeddedCassandra.getPort())),
+                "cassandra.contact-points", server.getHost(),
+                "cassandra.native-protocol-port", Integer.toString(server.getPort())),
                 new TestingConnectorContext());
 
         metadata = connector.getMetadata(CassandraTransactionHandle.INSTANCE);
@@ -120,8 +111,12 @@ public class TestCassandraConnector
 
         database = keyspace;
         table = new SchemaTableName(database, TABLE_ALL_TYPES.toLowerCase(ENGLISH));
-        tableUnpartitioned = new SchemaTableName(database, "presto_test_unpartitioned");
-        invalidTable = new SchemaTableName(database, "totally_invalid_table_name");
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void tearDown()
+    {
+        server.close();
     }
 
     @Test
@@ -163,9 +158,9 @@ public class TestCassandraConnector
 
         ConnectorTransactionHandle transaction = CassandraTransactionHandle.INSTANCE;
 
-        List<ConnectorTableLayoutResult> layouts = metadata.getTableLayouts(SESSION, tableHandle, Constraint.alwaysTrue(), Optional.empty());
-        ConnectorTableLayoutHandle layout = getOnlyElement(layouts).getTableLayout().getHandle();
-        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, layout, UNGROUPED_SCHEDULING));
+        tableHandle = metadata.applyFilter(SESSION, tableHandle, Constraint.alwaysTrue()).get().getHandle();
+
+        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, UNGROUPED_SCHEDULING, DynamicFilter.EMPTY));
 
         long rowNumber = 0;
         for (ConnectorSplit split : splits) {
@@ -198,7 +193,7 @@ public class TestCassandraConnector
 
                     assertEquals(cursor.getSlice(columnIndex.get("typeuuid")).toStringUtf8(), format("00000000-0000-0000-0000-%012d", rowId));
 
-                    assertEquals(cursor.getSlice(columnIndex.get("typetimestamp")).toStringUtf8(), Long.valueOf(DATE.getTime()).toString());
+                    assertEquals(cursor.getLong(columnIndex.get("typetimestamp")), packDateTimeWithZone(DATE.getTime(), UTC_KEY));
 
                     long newCompletedBytes = cursor.getCompletedBytes();
                     assertTrue(newCompletedBytes >= completedBytes);
@@ -224,7 +219,7 @@ public class TestCassandraConnector
                 else if (BIGINT.equals(type)) {
                     cursor.getLong(columnIndex);
                 }
-                else if (TIMESTAMP.equals(type)) {
+                else if (TIMESTAMP_WITH_TIME_ZONE.equals(type)) {
                     cursor.getLong(columnIndex);
                 }
                 else if (DOUBLE.equals(type)) {
@@ -233,7 +228,7 @@ public class TestCassandraConnector
                 else if (REAL.equals(type)) {
                     cursor.getLong(columnIndex);
                 }
-                else if (isVarcharType(type) || VARBINARY.equals(type)) {
+                else if (type instanceof VarcharType || VARBINARY.equals(type)) {
                     try {
                         cursor.getSlice(columnIndex);
                     }

@@ -14,6 +14,7 @@
 package io.prestosql.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
+import io.prestosql.sql.planner.Symbol;
 import io.prestosql.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.prestosql.sql.planner.plan.DistinctLimitNode;
 import io.prestosql.sql.planner.plan.ValuesNode;
@@ -34,8 +35,8 @@ public class TestMergeLimitWithDistinct
                         p.limit(
                                 1,
                                 p.aggregation(builder -> builder
-                                                .singleGroupingSet(p.symbol("foo"))
-                                                .source(p.values(p.symbol("foo"))))))
+                                        .singleGroupingSet(p.symbol("foo"))
+                                        .source(p.values(p.symbol("foo"))))))
                 .matches(
                         node(DistinctLimitNode.class,
                                 node(ValuesNode.class)));
@@ -49,9 +50,9 @@ public class TestMergeLimitWithDistinct
                         p.limit(
                                 1,
                                 p.aggregation(builder -> builder
-                                                .addAggregation(p.symbol("c"), expression("count(foo)"), ImmutableList.of(BIGINT))
-                                                .globalGrouping()
-                                                .source(p.values(p.symbol("foo"))))))
+                                        .addAggregation(p.symbol("c"), expression("count(foo)"), ImmutableList.of(BIGINT))
+                                        .globalGrouping()
+                                        .source(p.values(p.symbol("foo"))))))
                 .doesNotFire();
 
         tester().assertThat(new MergeLimitWithDistinct())
@@ -59,8 +60,24 @@ public class TestMergeLimitWithDistinct
                         p.limit(
                                 1,
                                 p.aggregation(builder -> builder
-                                                .globalGrouping()
-                                                .source(p.values(p.symbol("foo"))))))
+                                        .globalGrouping()
+                                        .source(p.values(p.symbol("foo"))))))
+                .doesNotFire();
+    }
+
+    @Test
+    public void testDoNotMergeLimitWithTies()
+    {
+        tester().assertThat(new MergeLimitWithDistinct())
+                .on(p -> {
+                    Symbol foo = p.symbol("foo");
+                    return p.limit(
+                            1,
+                            ImmutableList.of(foo),
+                            p.aggregation(builder -> builder
+                                    .singleGroupingSet(foo)
+                                    .source(p.values(foo))));
+                })
                 .doesNotFire();
     }
 }

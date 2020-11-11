@@ -42,12 +42,12 @@ public class GeoPlugin
     {
         return ImmutableSet.<Class<?>>builder()
                 .add(GeoFunctions.class)
-                .add(BingTileOperators.class)
                 .add(BingTileFunctions.class)
                 .add(BingTileCoordinatesFunction.class)
                 .add(ConvexHullAggregation.class)
                 .add(GeometryUnionAgg.class)
                 .add(KdbTreeCasts.class)
+                .add(EncodedPolylineFunctions.class)
                 .add(SpatialPartitioningAggregateFunction.class)
                 .add(SpatialPartitioningInternalAggregateFunction.class)
                 .build();

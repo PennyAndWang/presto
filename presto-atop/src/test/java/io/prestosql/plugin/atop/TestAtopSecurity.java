@@ -14,6 +14,7 @@
 package io.prestosql.plugin.atop;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.io.Resources;
 import io.prestosql.Session;
 import io.prestosql.spi.security.AccessDeniedException;
 import io.prestosql.spi.security.Identity;
@@ -22,7 +23,9 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static io.prestosql.plugin.atop.LocalAtopQueryRunner.createQueryRunner;
 import static io.prestosql.testing.TestingSession.testSessionBuilder;
@@ -33,9 +36,11 @@ public class TestAtopSecurity
 
     @BeforeClass
     public void setUp()
+            throws Exception
     {
-        String path = this.getClass().getResource("security.json").getPath();
-        queryRunner = createQueryRunner(ImmutableMap.of("atop.security", "file", "security.config-file", path), TestingAtopFactory.class);
+        Path atopExecutable = Files.createTempFile(null, null);
+        String path = new File(Resources.getResource(getClass(), "security.json").toURI()).getPath();
+        queryRunner = createQueryRunner(ImmutableMap.of("atop.security", "file", "security.config-file", path, "atop.executable-path", atopExecutable.toString()), TestingAtopFactory.class);
     }
 
     @AfterClass(alwaysRun = true)
@@ -64,6 +69,7 @@ public class TestAtopSecurity
         return testSessionBuilder()
                 .setCatalog(queryRunner.getDefaultSession().getCatalog().get())
                 .setSchema(queryRunner.getDefaultSession().getSchema().get())
-                .setIdentity(new Identity(user, Optional.empty())).build();
+                .setIdentity(Identity.ofUser(user))
+                .build();
     }
 }

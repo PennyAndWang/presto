@@ -27,13 +27,12 @@ import io.prestosql.operator.project.CursorProcessor;
 import io.prestosql.operator.project.PageProcessor;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.connector.ColumnHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedPageSource;
 import io.prestosql.spi.type.Type;
 import io.prestosql.sql.gen.ExpressionCompiler;
 import io.prestosql.sql.gen.PageFunctionCompiler;
-import io.prestosql.sql.parser.SqlParser;
 import io.prestosql.sql.planner.Symbol;
-import io.prestosql.sql.planner.TypeAnalyzer;
 import io.prestosql.sql.planner.TypeProvider;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.sql.relational.RowExpression;
@@ -74,11 +73,11 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
-import static io.prestosql.metadata.FunctionKind.SCALAR;
 import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
-import static io.prestosql.operator.scalar.FunctionAssertions.createExpression;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
+import static io.prestosql.sql.ExpressionTestUtils.createExpression;
+import static io.prestosql.sql.ExpressionTestUtils.getTypes;
 import static io.prestosql.testing.TestingHandles.TEST_TABLE_HANDLE;
 import static io.prestosql.testing.TestingSplit.createLocalSplit;
 import static java.util.Locale.ENGLISH;
@@ -100,10 +99,9 @@ public class BenchmarkScanFilterAndProjectOperator
 
     private static final Session TEST_SESSION = TestingSession.testSessionBuilder().build();
     private static final Metadata METADATA = createTestMetadataManager();
-    private static final TypeAnalyzer TYPE_ANALYZER = new TypeAnalyzer(new SqlParser(), METADATA);
 
     private static final int TOTAL_POSITIONS = 1_000_000;
-    private static final DataSize FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE = new DataSize(500, KILOBYTE);
+    private static final DataSize FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE = DataSize.of(500, KILOBYTE);
     private static final int FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT = 256;
 
     @State(Thread)
@@ -131,8 +129,8 @@ public class BenchmarkScanFilterAndProjectOperator
         @Setup
         public void setup()
         {
-            executor = newCachedThreadPool(daemonThreadsNamed("test-executor-%s"));
-            scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
+            executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+            scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
 
             Type type = TYPE_MAP.get(this.type);
 
@@ -169,11 +167,12 @@ public class BenchmarkScanFilterAndProjectOperator
                     0,
                     new PlanNodeId("test"),
                     new PlanNodeId("test_source"),
-                    (session, split, table, columns) -> new FixedPageSource(inputPages),
+                    (session, split, table, columns, dynamicFilter) -> new FixedPageSource(inputPages),
                     () -> cursorProcessor,
                     () -> pageProcessor,
                     TEST_TABLE_HANDLE,
                     columnHandles,
+                    DynamicFilter.EMPTY,
                     types,
                     FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE,
                     FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT);
@@ -181,7 +180,7 @@ public class BenchmarkScanFilterAndProjectOperator
 
         public TaskContext createTaskContext()
         {
-            return TestingTaskContext.createTaskContext(executor, scheduledExecutor, TEST_SESSION, new DataSize(2, GIGABYTE));
+            return TestingTaskContext.createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.of(2, GIGABYTE));
         }
 
         public OperatorFactory getOperatorFactory()
@@ -233,11 +232,9 @@ public class BenchmarkScanFilterAndProjectOperator
 
             return SqlToRowExpressionTranslator.translate(
                     expression,
-                    SCALAR,
-                    TYPE_ANALYZER.getTypes(TEST_SESSION, TypeProvider.copyOf(symbolTypes), expression),
+                    getTypes(TEST_SESSION, METADATA, TypeProvider.copyOf(symbolTypes), expression),
                     sourceLayout,
-                    METADATA.getFunctionRegistry(),
-                    METADATA.getTypeManager(),
+                    METADATA,
                     TEST_SESSION,
                     true);
         }
@@ -261,6 +258,7 @@ public class BenchmarkScanFilterAndProjectOperator
 
         ImmutableList.Builder<Page> outputPages = ImmutableList.builder();
         operator.addSplit(new Split(new CatalogName("test"), createLocalSplit(), Lifespan.taskWide()));
+        operator.noMoreSplits();
 
         for (int loops = 0; !operator.isFinished() && loops < 1_000_000; loops++) {
             Page outputPage = operator.getOutput();

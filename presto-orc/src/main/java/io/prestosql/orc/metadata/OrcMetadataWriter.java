@@ -15,11 +15,13 @@ package io.prestosql.orc.metadata;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.CountingOutputStream;
+import com.google.common.primitives.Longs;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.prestosql.orc.metadata.ColumnEncoding.ColumnEncodingKind;
 import io.prestosql.orc.metadata.OrcType.OrcTypeKind;
 import io.prestosql.orc.metadata.Stream.StreamKind;
+import io.prestosql.orc.metadata.statistics.BloomFilter;
 import io.prestosql.orc.metadata.statistics.ColumnStatistics;
 import io.prestosql.orc.metadata.statistics.StripeStatistics;
 import io.prestosql.orc.proto.OrcProto;
@@ -32,11 +34,13 @@ import io.prestosql.orc.protobuf.MessageLite;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
-import java.util.TimeZone;
+import java.util.Optional;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.orc.metadata.PostScript.MAGIC;
 import static java.lang.Math.toIntExact;
 import static java.util.stream.Collectors.toList;
 
@@ -75,6 +79,7 @@ public class OrcMetadataWriter
                 .setCompression(toCompression(compression))
                 .setCompressionBlockSize(compressionBlockSize)
                 .setWriterVersion(useLegacyVersion ? HIVE_LEGACY_WRITER_VERSION : PRESTO_WRITER_VERSION)
+                .setMagic(MAGIC.toStringUtf8())
                 .build();
 
         return writeProtobufObject(output, postScriptProtobuf);
@@ -86,6 +91,7 @@ public class OrcMetadataWriter
     {
         OrcProto.Metadata metadataProtobuf = OrcProto.Metadata.newBuilder()
                 .addAllStripeStats(metadata.getStripeStatsList().stream()
+                        .map(Optional::get)
                         .map(OrcMetadataWriter::toStripeStatistics)
                         .collect(toList()))
                 .build();
@@ -108,14 +114,14 @@ public class OrcMetadataWriter
     {
         OrcProto.Footer.Builder builder = OrcProto.Footer.newBuilder()
                 .setNumberOfRows(footer.getNumberOfRows())
-                .setRowIndexStride(footer.getRowsInRowGroup())
+                .setRowIndexStride(footer.getRowsInRowGroup().orElse(0))
                 .addAllStripes(footer.getStripes().stream()
                         .map(OrcMetadataWriter::toStripeInformation)
                         .collect(toList()))
                 .addAllTypes(footer.getTypes().stream()
                         .map(OrcMetadataWriter::toType)
                         .collect(toList()))
-                .addAllStatistics(footer.getFileStats().stream()
+                .addAllStatistics(footer.getFileStats().map(ColumnMetadata::stream).orElseGet(java.util.stream.Stream::empty)
                         .map(OrcMetadataWriter::toColumnStatistics)
                         .collect(toList()))
                 .addAllMetadata(footer.getUserMetadata().entrySet().stream()
@@ -144,8 +150,11 @@ public class OrcMetadataWriter
     {
         Builder builder = Type.newBuilder()
                 .setKind(toTypeKind(type.getOrcTypeKind()))
-                .addAllSubtypes(type.getFieldTypeIndexes())
-                .addAllFieldNames(type.getFieldNames());
+                .addAllSubtypes(type.getFieldTypeIndexes().stream()
+                        .map(OrcColumnId::getId)
+                        .collect(toList()))
+                .addAllFieldNames(type.getFieldNames())
+                .addAllAttributes(toStringPairList(type.getAttributes()));
 
         if (type.getLength().isPresent()) {
             builder.setMaximumLength(type.getLength().get());
@@ -190,6 +199,8 @@ public class OrcMetadataWriter
                 return OrcProto.Type.Kind.DATE;
             case TIMESTAMP:
                 return OrcProto.Type.Kind.TIMESTAMP;
+            case TIMESTAMP_INSTANT:
+                return OrcProto.Type.Kind.TIMESTAMP_INSTANT;
             case LIST:
                 return OrcProto.Type.Kind.LIST;
             case MAP:
@@ -200,6 +211,16 @@ public class OrcMetadataWriter
                 return OrcProto.Type.Kind.UNION;
         }
         throw new IllegalArgumentException("Unsupported type: " + orcTypeKind);
+    }
+
+    private static List<OrcProto.StringPair> toStringPairList(Map<String, String> attributes)
+    {
+        return attributes.entrySet().stream()
+                .map(entry -> OrcProto.StringPair.newBuilder()
+                        .setKey(entry.getKey())
+                        .setValue(entry.getValue())
+                        .build())
+                .collect(toImmutableList());
     }
 
     private static OrcProto.ColumnStatistics toColumnStatistics(ColumnStatistics columnStatistics)
@@ -252,6 +273,13 @@ public class OrcMetadataWriter
                     .build());
         }
 
+        if (columnStatistics.getTimestampStatistics() != null) {
+            builder.setTimestampStatistics(OrcProto.TimestampStatistics.newBuilder()
+                    .setMinimumUtc(columnStatistics.getTimestampStatistics().getMin())
+                    .setMaximumUtc(columnStatistics.getTimestampStatistics().getMax())
+                    .build());
+        }
+
         if (columnStatistics.getDecimalStatistics() != null) {
             builder.setDecimalStatistics(OrcProto.DecimalStatistics.newBuilder()
                     .setMinimum(columnStatistics.getDecimalStatistics().getMin().toString())
@@ -280,8 +308,6 @@ public class OrcMetadataWriter
     public int writeStripeFooter(SliceOutput output, StripeFooter footer)
             throws IOException
     {
-        ZoneId zone = footer.getTimeZone().orElseThrow(() -> new IllegalArgumentException("Time zone not set"));
-
         OrcProto.StripeFooter footerProtobuf = OrcProto.StripeFooter.newBuilder()
                 .addAllStreams(footer.getStreams().stream()
                         .map(OrcMetadataWriter::toStream)
@@ -289,7 +315,7 @@ public class OrcMetadataWriter
                 .addAllColumns(footer.getColumnEncodings().stream()
                         .map(OrcMetadataWriter::toColumnEncoding)
                         .collect(toList()))
-                .setWriterTimezone(TimeZone.getTimeZone(zone).getID())
+                .setWriterTimezone(footer.getTimeZone().getId())
                 .build();
 
         return writeProtobufObject(output, footerProtobuf);
@@ -298,7 +324,7 @@ public class OrcMetadataWriter
     private static OrcProto.Stream toStream(Stream stream)
     {
         return OrcProto.Stream.newBuilder()
-                .setColumn(stream.getColumn())
+                .setColumn(stream.getColumnId().getId())
                 .setKind(toStreamKind(stream.getStreamKind()))
                 .setLength(stream.getLength())
                 .build();
@@ -321,6 +347,8 @@ public class OrcMetadataWriter
                 return OrcProto.Stream.Kind.SECONDARY;
             case ROW_INDEX:
                 return OrcProto.Stream.Kind.ROW_INDEX;
+            case BLOOM_FILTER_UTF8:
+                return OrcProto.Stream.Kind.BLOOM_FILTER_UTF8;
         }
         throw new IllegalArgumentException("Unsupported stream kind: " + streamKind);
     }
@@ -367,6 +395,26 @@ public class OrcMetadataWriter
                         .map(Integer::longValue)
                         .collect(toList()))
                 .setStatistics(toColumnStatistics(rowGroupIndex.getColumnStatistics()))
+                .build();
+    }
+
+    @Override
+    public int writeBloomFilters(SliceOutput output, List<BloomFilter> bloomFilters)
+            throws IOException
+    {
+        OrcProto.BloomFilterIndex bloomFilterIndex = OrcProto.BloomFilterIndex.newBuilder()
+                .addAllBloomFilter(bloomFilters.stream()
+                        .map(OrcMetadataWriter::toBloomFilter)
+                        .collect(toList()))
+                .build();
+        return writeProtobufObject(output, bloomFilterIndex);
+    }
+
+    private static OrcProto.BloomFilter toBloomFilter(BloomFilter bloomFilter)
+    {
+        return OrcProto.BloomFilter.newBuilder()
+                .addAllBitset(Longs.asList(bloomFilter.getBitSet()))
+                .setNumHashFunctions(bloomFilter.getNumHashFunctions())
                 .build();
     }
 

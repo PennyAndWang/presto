@@ -18,8 +18,9 @@ import io.prestosql.spi.HostAddress;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
-import io.prestosql.spi.connector.ConnectorTableLayoutHandle;
+import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedSplitSource;
 
 import javax.inject.Inject;
@@ -43,15 +44,14 @@ public class MongoSplitManager
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorTableLayoutHandle layout, SplitSchedulingStrategy splitSchedulingStrategy)
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            SplitSchedulingStrategy splitSchedulingStrategy,
+            DynamicFilter dynamicFilter)
     {
-        MongoTableLayoutHandle tableLayout = (MongoTableLayoutHandle) layout;
-        MongoTableHandle tableHandle = tableLayout.getTable();
-
-        MongoSplit split = new MongoSplit(
-                tableHandle.getSchemaTableName(),
-                tableLayout.getTupleDomain(),
-                addresses);
+        MongoSplit split = new MongoSplit(addresses);
 
         return new FixedSplitSource(ImmutableList.of(split));
     }

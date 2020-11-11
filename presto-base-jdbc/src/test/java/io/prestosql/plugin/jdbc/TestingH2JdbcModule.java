@@ -17,32 +17,40 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.Singleton;
+import io.prestosql.plugin.jdbc.credential.CredentialProvider;
 import org.h2.Driver;
 
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
-import static io.airlift.configuration.ConfigBinder.configBinder;
 import static java.lang.String.format;
 
-class TestingH2JdbcModule
+public class TestingH2JdbcModule
         implements Module
 {
     @Override
-    public void configure(Binder binder)
+    public void configure(Binder binder) {}
+
+    @Provides
+    @ForBaseJdbc
+    public JdbcClient provideJdbcClient(BaseJdbcConfig config, ConnectionFactory connectionFactory)
     {
-        configBinder(binder).bindConfig(BaseJdbcConfig.class);
+        return new TestingH2JdbcClient(config, connectionFactory);
     }
 
     @Provides
-    public JdbcClient provideJdbcClient(BaseJdbcConfig config)
+    @Singleton
+    @ForBaseJdbc
+    public ConnectionFactory getConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider)
     {
-        return new BaseJdbcClient(config, "\"", new DriverConnectionFactory(new Driver(), config));
+        return new DriverConnectionFactory(new Driver(), config, credentialProvider);
     }
 
     public static Map<String, String> createProperties()
     {
         return ImmutableMap.<String, String>builder()
-                .put("connection-url", format("jdbc:h2:mem:test%s;DB_CLOSE_DELAY=-1", System.nanoTime()))
+                .put("connection-url", format("jdbc:h2:mem:test%s;DB_CLOSE_DELAY=-1", System.nanoTime() + ThreadLocalRandom.current().nextLong()))
                 .build();
     }
 }

@@ -13,7 +13,6 @@
  */
 package io.prestosql.plugin.kafka;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.prestosql.decoder.DispatchingRowDecoderFactory;
 import io.prestosql.decoder.RowDecoder;
@@ -31,24 +30,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.prestosql.plugin.kafka.KafkaHandleResolver.convertSplit;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Factory for Kafka specific {@link RecordSet} instances.
- */
 public class KafkaRecordSetProvider
         implements ConnectorRecordSetProvider
 {
-    private DispatchingRowDecoderFactory decoderFactory;
-    private final KafkaSimpleConsumerManager consumerManager;
+    private final DispatchingRowDecoderFactory decoderFactory;
+    private final KafkaConsumerFactory consumerFactory;
 
     @Inject
-    public KafkaRecordSetProvider(DispatchingRowDecoderFactory decoderFactory, KafkaSimpleConsumerManager consumerManager)
+    public KafkaRecordSetProvider(DispatchingRowDecoderFactory decoderFactory, KafkaConsumerFactory consumerFactory)
     {
         this.decoderFactory = requireNonNull(decoderFactory, "decoderFactory is null");
-        this.consumerManager = requireNonNull(consumerManager, "consumerManager is null");
+        this.consumerFactory = requireNonNull(consumerFactory, "consumerManager is null");
     }
 
     @Override
@@ -58,14 +55,14 @@ public class KafkaRecordSetProvider
 
         List<KafkaColumnHandle> kafkaColumns = columns.stream()
                 .map(KafkaHandleResolver::convertColumnHandle)
-                .collect(ImmutableList.toImmutableList());
+                .collect(toImmutableList());
 
         RowDecoder keyDecoder = decoderFactory.create(
                 kafkaSplit.getKeyDataFormat(),
                 getDecoderParameters(kafkaSplit.getKeyDataSchemaContents()),
                 kafkaColumns.stream()
                         .filter(col -> !col.isInternal())
-                        .filter(KafkaColumnHandle::isKeyDecoder)
+                        .filter(KafkaColumnHandle::isKeyCodec)
                         .collect(toImmutableSet()));
 
         RowDecoder messageDecoder = decoderFactory.create(
@@ -73,10 +70,10 @@ public class KafkaRecordSetProvider
                 getDecoderParameters(kafkaSplit.getMessageDataSchemaContents()),
                 kafkaColumns.stream()
                         .filter(col -> !col.isInternal())
-                        .filter(col -> !col.isKeyDecoder())
+                        .filter(col -> !col.isKeyCodec())
                         .collect(toImmutableSet()));
 
-        return new KafkaRecordSet(kafkaSplit, consumerManager, kafkaColumns, keyDecoder, messageDecoder);
+        return new KafkaRecordSet(kafkaSplit, consumerFactory, kafkaColumns, keyDecoder, messageDecoder);
     }
 
     private Map<String, String> getDecoderParameters(Optional<String> dataSchema)

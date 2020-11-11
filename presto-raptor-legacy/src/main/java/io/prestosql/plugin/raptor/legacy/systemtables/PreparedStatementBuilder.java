@@ -21,6 +21,7 @@ import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.Range;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.VarcharType;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -41,8 +42,8 @@ import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
-import static io.prestosql.spi.type.Varchars.isVarcharType;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.sql.ResultSet.CONCUR_READ_ONLY;
 import static java.sql.ResultSet.TYPE_FORWARD_ONLY;
 import static java.util.Collections.nCopies;
@@ -199,7 +200,7 @@ public final class PreparedStatementBuilder
 
                 discreteValues -> {
                     String values = Joiner.on(",").join(nCopies(discreteValues.getValues().size(), "?"));
-                    String predicate = columnName + (discreteValues.isWhiteList() ? "" : " NOT") + " IN (" + values + ")";
+                    String predicate = columnName + (discreteValues.isInclusive() ? "" : " NOT") + " IN (" + values + ")";
                     for (Object value : discreteValues.getValues()) {
                         bindValues.add(ValueBuffer.create(columnIndex, type, getBindValue(columnIndex, uuidColumnIndexes, value)));
                     }
@@ -247,7 +248,7 @@ public final class PreparedStatementBuilder
             preparedStatement.setBytes(parameterIndex, valueBuffer.getSlice().getBytes());
         }
         else if (type.getJavaType() == Slice.class) {
-            preparedStatement.setString(parameterIndex, new String(valueBuffer.getSlice().getBytes()));
+            preparedStatement.setString(parameterIndex, new String(valueBuffer.getSlice().getBytes(), UTF_8));
         }
         else {
             throw new IllegalArgumentException("Unknown Java type: " + type.getJavaType());
@@ -265,7 +266,7 @@ public final class PreparedStatementBuilder
         if (type.equals(BOOLEAN)) {
             return Types.BOOLEAN;
         }
-        if (isVarcharType(type)) {
+        if (type instanceof VarcharType) {
             return Types.VARCHAR;
         }
         if (type.equals(VARBINARY)) {

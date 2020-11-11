@@ -14,9 +14,11 @@
 package io.prestosql.plugin.hive.metastore;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.prestosql.spi.connector.SchemaTableName;
 
 import javax.annotation.concurrent.Immutable;
 
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -45,6 +48,7 @@ public class Table
     private final Map<String, String> parameters;
     private final Optional<String> viewOriginalText;
     private final Optional<String> viewExpandedText;
+    private final OptionalLong writeId;
 
     @JsonCreator
     public Table(
@@ -57,7 +61,8 @@ public class Table
             @JsonProperty("partitionColumns") List<Column> partitionColumns,
             @JsonProperty("parameters") Map<String, String> parameters,
             @JsonProperty("viewOriginalText") Optional<String> viewOriginalText,
-            @JsonProperty("viewExpandedText") Optional<String> viewExpandedText)
+            @JsonProperty("viewExpandedText") Optional<String> viewExpandedText,
+            @JsonProperty("writeId") OptionalLong writeId)
     {
         this.databaseName = requireNonNull(databaseName, "databaseName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
@@ -69,6 +74,7 @@ public class Table
         this.parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
         this.viewOriginalText = requireNonNull(viewOriginalText, "viewOriginalText is null");
         this.viewExpandedText = requireNonNull(viewExpandedText, "viewExpandedText is null");
+        this.writeId = requireNonNull(writeId, "writeId is null");
     }
 
     @JsonProperty
@@ -81,6 +87,12 @@ public class Table
     public String getTableName()
     {
         return tableName;
+    }
+
+    @JsonIgnore
+    public SchemaTableName getSchemaTableName()
+    {
+        return new SchemaTableName(databaseName, tableName);
     }
 
     @JsonProperty
@@ -136,6 +148,12 @@ public class Table
     public Optional<String> getViewExpandedText()
     {
         return viewExpandedText;
+    }
+
+    @JsonProperty
+    public OptionalLong getWriteId()
+    {
+        return writeId;
     }
 
     public static Builder builder()
@@ -216,6 +234,7 @@ public class Table
         private Map<String, String> parameters = new LinkedHashMap<>();
         private Optional<String> viewOriginalText = Optional.empty();
         private Optional<String> viewExpandedText = Optional.empty();
+        private OptionalLong writeId = OptionalLong.empty();
 
         private Builder()
         {
@@ -234,6 +253,7 @@ public class Table
             parameters = new LinkedHashMap<>(table.parameters);
             viewOriginalText = table.viewOriginalText;
             viewExpandedText = table.viewExpandedText;
+            writeId = table.writeId;
         }
 
         public Builder setDatabaseName(String databaseName)
@@ -289,6 +309,12 @@ public class Table
             return this;
         }
 
+        public Builder setParameter(String key, String value)
+        {
+            this.parameters.put(key, value);
+            return this;
+        }
+
         public Builder setViewOriginalText(Optional<String> viewOriginalText)
         {
             this.viewOriginalText = viewOriginalText;
@@ -298,6 +324,12 @@ public class Table
         public Builder setViewExpandedText(Optional<String> viewExpandedText)
         {
             this.viewExpandedText = viewExpandedText;
+            return this;
+        }
+
+        public Builder setWriteId(OptionalLong writeId)
+        {
+            this.writeId = writeId;
             return this;
         }
 
@@ -319,7 +351,8 @@ public class Table
                     partitionColumns,
                     parameters,
                     viewOriginalText,
-                    viewExpandedText);
+                    viewExpandedText,
+                    writeId);
         }
     }
 }

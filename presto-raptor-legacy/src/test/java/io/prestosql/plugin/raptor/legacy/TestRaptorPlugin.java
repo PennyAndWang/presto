@@ -22,7 +22,6 @@ import org.testng.annotations.Test;
 
 import java.io.File;
 import java.util.Map;
-import java.util.ServiceLoader;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.io.MoreFiles.deleteRecursively;
@@ -35,8 +34,7 @@ public class TestRaptorPlugin
     public void testPlugin()
             throws Exception
     {
-        RaptorPlugin plugin = loadPlugin(RaptorPlugin.class);
-
+        Plugin plugin = new RaptorPlugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
         assertInstanceOf(factory, RaptorConnectorFactory.class);
 
@@ -48,21 +46,10 @@ public class TestRaptorPlugin
                     .put("storage.data-directory", tmpDir.getAbsolutePath())
                     .build();
 
-            factory.create("test", config, new TestingConnectorContext());
+            factory.create("test", config, new TestingConnectorContext()).shutdown();
         }
         finally {
             deleteRecursively(tmpDir.toPath(), ALLOW_INSECURE);
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T extends Plugin> T loadPlugin(Class<T> clazz)
-    {
-        for (Plugin plugin : ServiceLoader.load(Plugin.class)) {
-            if (clazz.isInstance(plugin)) {
-                return (T) plugin;
-            }
-        }
-        throw new AssertionError("did not find plugin: " + clazz.getName());
     }
 }

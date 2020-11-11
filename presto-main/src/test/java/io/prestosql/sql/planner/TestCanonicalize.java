@@ -16,7 +16,7 @@ package io.prestosql.sql.planner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.prestosql.spi.block.SortOrder;
+import io.prestosql.spi.connector.SortOrder;
 import io.prestosql.sql.planner.assertions.BasePlanTest;
 import io.prestosql.sql.planner.assertions.ExpectedValueProvider;
 import io.prestosql.sql.planner.iterative.IterativeOptimizer;
@@ -75,7 +75,7 @@ public class TestCanonicalize
                                         .addFunction(functionCall("row_number", Optional.empty(), ImmutableList.of())),
                                 values("A"))),
                 ImmutableList.of(
-                        new UnaliasSymbolReferences(),
+                        new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
                         new IterativeOptimizer(
                                 new RuleStatsRecorder(),
                                 getQueryRunner().getStatsCalculator(),

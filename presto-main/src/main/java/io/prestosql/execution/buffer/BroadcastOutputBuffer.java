@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -68,12 +69,16 @@ public class BroadcastOutputBuffer
     private final AtomicLong totalRowsAdded = new AtomicLong();
     private final AtomicLong totalBufferedPages = new AtomicLong();
 
+    private final AtomicBoolean hasBlockedBefore = new AtomicBoolean();
+    private final Runnable notifyStatusChanged;
+
     public BroadcastOutputBuffer(
             String taskInstanceId,
             StateMachine<BufferState> state,
             DataSize maxBufferSize,
             Supplier<LocalMemoryContext> systemMemoryContextSupplier,
-            Executor notificationExecutor)
+            Executor notificationExecutor,
+            Runnable notifyStatusChanged)
     {
         this.taskInstanceId = requireNonNull(taskInstanceId, "taskInstanceId is null");
         this.state = requireNonNull(state, "state is null");
@@ -81,6 +86,7 @@ public class BroadcastOutputBuffer
                 requireNonNull(maxBufferSize, "maxBufferSize is null").toBytes(),
                 requireNonNull(systemMemoryContextSupplier, "systemMemoryContextSupplier is null"),
                 requireNonNull(notificationExecutor, "notificationExecutor is null"));
+        this.notifyStatusChanged = requireNonNull(notifyStatusChanged, "notifyStatusChanged is null");
     }
 
     @Override
@@ -104,7 +110,7 @@ public class BroadcastOutputBuffer
     @Override
     public boolean isOverutilized()
     {
-        return memoryManager.isOverutilized();
+        return (getUtilization() > 0.5) && state.get().canAddPages();
     }
 
     @Override
@@ -139,7 +145,7 @@ public class BroadcastOutputBuffer
     @Override
     public void setOutputBuffers(OutputBuffers newOutputBuffers)
     {
-        checkState(!Thread.holdsLock(this), "Can not set output buffers while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot set output buffers while holding a lock on this");
         requireNonNull(newOutputBuffers, "newOutputBuffers is null");
 
         synchronized (this) {
@@ -187,7 +193,7 @@ public class BroadcastOutputBuffer
     @Override
     public void enqueue(List<SerializedPage> pages)
     {
-        checkState(!Thread.holdsLock(this), "Can not enqueue pages while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot enqueue pages while holding a lock on this");
         requireNonNull(pages, "pages is null");
 
         // ignore pages after "no more pages" is set
@@ -231,6 +237,15 @@ public class BroadcastOutputBuffer
 
         // drop the initial reference
         serializedPageReferences.forEach(SerializedPageReference::dereferencePage);
+
+        // if the buffer is full for first time and more clients are expected, update the task status
+        // notifying a status change will lead to the SourcePartitionedScheduler sending 'no-more-buffers' to unblock
+        if (!hasBlockedBefore.get()
+                && state.get().canAddBuffers()
+                && !isFull().isDone()
+                && hasBlockedBefore.compareAndSet(false, true)) {
+            notifyStatusChanged.run();
+        }
     }
 
     @Override
@@ -243,7 +258,7 @@ public class BroadcastOutputBuffer
     @Override
     public ListenableFuture<BufferResult> get(OutputBufferId outputBufferId, long startingSequenceId, DataSize maxSize)
     {
-        checkState(!Thread.holdsLock(this), "Can not get pages while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot get pages while holding a lock on this");
         requireNonNull(outputBufferId, "outputBufferId is null");
         checkArgument(maxSize.toBytes() > 0, "maxSize must be at least 1 byte");
 
@@ -253,7 +268,7 @@ public class BroadcastOutputBuffer
     @Override
     public void acknowledge(OutputBufferId bufferId, long sequenceId)
     {
-        checkState(!Thread.holdsLock(this), "Can not acknowledge pages while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot acknowledge pages while holding a lock on this");
         requireNonNull(bufferId, "bufferId is null");
 
         getBuffer(bufferId).acknowledgePages(sequenceId);
@@ -262,7 +277,7 @@ public class BroadcastOutputBuffer
     @Override
     public void abort(OutputBufferId bufferId)
     {
-        checkState(!Thread.holdsLock(this), "Can not abort while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot abort while holding a lock on this");
         requireNonNull(bufferId, "bufferId is null");
 
         getBuffer(bufferId).destroy();
@@ -273,7 +288,7 @@ public class BroadcastOutputBuffer
     @Override
     public void setNoMorePages()
     {
-        checkState(!Thread.holdsLock(this), "Can not set no more pages while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot set no more pages while holding a lock on this");
         state.compareAndSet(OPEN, NO_MORE_PAGES);
         state.compareAndSet(NO_MORE_BUFFERS, FLUSHING);
         memoryManager.setNoBlockOnFull();
@@ -286,7 +301,7 @@ public class BroadcastOutputBuffer
     @Override
     public void destroy()
     {
-        checkState(!Thread.holdsLock(this), "Can not destroy while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot destroy while holding a lock on this");
 
         // ignore destroy if the buffer already in a terminal state.
         if (state.setIf(FINISHED, oldState -> !oldState.isTerminal())) {
@@ -367,7 +382,7 @@ public class BroadcastOutputBuffer
 
     private void noMoreBuffers()
     {
-        checkState(!Thread.holdsLock(this), "Can not set no more buffers while holding a lock on this");
+        checkState(!Thread.holdsLock(this), "Cannot set no more buffers while holding a lock on this");
         List<SerializedPageReference> pages;
         synchronized (this) {
             pages = ImmutableList.copyOf(initialPagesForNewBuffers);

@@ -14,7 +14,6 @@
 package io.prestosql.benchmark;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
 import io.prestosql.operator.Driver;
 import io.prestosql.operator.DriverFactory;
@@ -27,10 +26,12 @@ import io.prestosql.operator.PartitionedLookupSourceFactory;
 import io.prestosql.operator.TaskContext;
 import io.prestosql.operator.ValuesOperator.ValuesOperatorFactory;
 import io.prestosql.spi.type.Type;
+import io.prestosql.spi.type.TypeOperators;
 import io.prestosql.spiller.SingleStreamSpillerFactory;
 import io.prestosql.sql.planner.plan.PlanNodeId;
 import io.prestosql.testing.LocalQueryRunner;
 import io.prestosql.testing.NullOutputOperator.NullOutputOperatorFactory;
+import io.prestosql.type.BlockTypeOperators;
 
 import java.util.List;
 import java.util.Optional;
@@ -41,7 +42,6 @@ import static io.prestosql.benchmark.BenchmarkQueryRunner.createLocalQueryRunner
 import static io.prestosql.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spiller.PartitioningSpillerFactory.unsupportedPartitioningSpillerFactory;
-import static java.util.Objects.requireNonNull;
 
 public class HashBuildBenchmark
         extends AbstractOperatorBenchmark
@@ -59,6 +59,7 @@ public class HashBuildBenchmark
         // hash build
         List<Type> ordersTypes = getColumnTypes("orders", "orderkey", "totalprice");
         OperatorFactory ordersTableScan = createTableScanOperator(0, new PlanNodeId("test"), "orders", "orderkey", "totalprice");
+        BlockTypeOperators blockTypeOperators = new BlockTypeOperators(new TypeOperators());
         JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager = JoinBridgeManager.lookupAllAtOnce(new PartitionedLookupSourceFactory(
                 ordersTypes,
                 ImmutableList.of(0, 1).stream()
@@ -68,8 +69,8 @@ public class HashBuildBenchmark
                         .map(ordersTypes::get)
                         .collect(toImmutableList()),
                 1,
-                requireNonNull(ImmutableMap.of(), "layout is null"),
-                false));
+                false,
+                blockTypeOperators));
         HashBuilderOperatorFactory hashBuilder = new HashBuilderOperatorFactory(
                 1,
                 new PlanNodeId("test"),
@@ -98,7 +99,8 @@ public class HashBuildBenchmark
                 OptionalInt.empty(),
                 Optional.empty(),
                 OptionalInt.empty(),
-                unsupportedPartitioningSpillerFactory());
+                unsupportedPartitioningSpillerFactory(),
+                blockTypeOperators);
         joinDriversBuilder.add(joinOperator);
         joinDriversBuilder.add(new NullOutputOperatorFactory(3, new PlanNodeId("test")));
         DriverFactory joinDriverFactory = new DriverFactory(1, true, true, joinDriversBuilder.build(), OptionalInt.empty(), UNGROUPED_EXECUTION);

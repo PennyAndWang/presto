@@ -29,6 +29,7 @@ import io.prestosql.spi.Page;
 import io.prestosql.spi.connector.BucketFunction;
 import io.prestosql.spi.connector.ConnectorPartitioningHandle;
 import io.prestosql.spi.type.Type;
+import io.prestosql.type.BlockTypeOperators;
 
 import java.util.List;
 import java.util.Objects;
@@ -136,7 +137,7 @@ public final class SystemPartitioningHandle
 
     public NodePartitionMap getNodePartitionMap(Session session, NodeScheduler nodeScheduler)
     {
-        NodeSelector nodeSelector = nodeScheduler.createNodeSelector(null);
+        NodeSelector nodeSelector = nodeScheduler.createNodeSelector(Optional.empty());
         List<InternalNode> nodes;
         if (partitioning == SystemPartitioning.COORDINATOR_ONLY) {
             nodes = ImmutableList.of(nodeSelector.selectCurrentNode());
@@ -158,12 +159,12 @@ public final class SystemPartitioningHandle
         });
     }
 
-    public PartitionFunction getPartitionFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int[] bucketToPartition)
+    public PartitionFunction getPartitionFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int[] bucketToPartition, BlockTypeOperators blockTypeOperators)
     {
         requireNonNull(partitionChannelTypes, "partitionChannelTypes is null");
         requireNonNull(bucketToPartition, "bucketToPartition is null");
 
-        BucketFunction bucketFunction = function.createBucketFunction(partitionChannelTypes, isHashPrecomputed, bucketToPartition.length);
+        BucketFunction bucketFunction = function.createBucketFunction(partitionChannelTypes, isHashPrecomputed, bucketToPartition.length, blockTypeOperators);
         return new BucketPartitionFunction(bucketFunction, bucketToPartition);
     }
 
@@ -171,7 +172,7 @@ public final class SystemPartitioningHandle
     {
         SINGLE {
             @Override
-            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount)
+            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount, BlockTypeOperators blockTypeOperators)
             {
                 checkArgument(bucketCount == 1, "Single partition can only have one bucket");
                 return new SingleBucketFunction();
@@ -179,44 +180,45 @@ public final class SystemPartitioningHandle
         },
         HASH {
             @Override
-            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount)
+            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount, BlockTypeOperators blockTypeOperators)
             {
                 if (isHashPrecomputed) {
                     return new HashBucketFunction(new PrecomputedHashGenerator(0), bucketCount);
                 }
-                else {
-                    int[] hashChannels = new int[partitionChannelTypes.size()];
-                    for (int i = 0; i < partitionChannelTypes.size(); i++) {
-                        hashChannels[i] = i;
-                    }
-
-                    return new HashBucketFunction(new InterpretedHashGenerator(partitionChannelTypes, hashChannels), bucketCount);
+                int[] hashChannels = new int[partitionChannelTypes.size()];
+                for (int i = 0; i < partitionChannelTypes.size(); i++) {
+                    hashChannels[i] = i;
                 }
+
+                return new HashBucketFunction(new InterpretedHashGenerator(partitionChannelTypes, hashChannels, blockTypeOperators), bucketCount);
             }
         },
         ROUND_ROBIN {
             @Override
-            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount)
+            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount, BlockTypeOperators blockTypeOperators)
             {
                 return new RoundRobinBucketFunction(bucketCount);
             }
         },
         BROADCAST {
             @Override
-            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount)
+            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount, BlockTypeOperators blockTypeOperators)
             {
                 throw new UnsupportedOperationException();
             }
         },
         UNKNOWN {
             @Override
-            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount)
+            public BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount, BlockTypeOperators blockTypeOperators)
             {
                 throw new UnsupportedOperationException();
             }
         };
 
-        public abstract BucketFunction createBucketFunction(List<Type> partitionChannelTypes, boolean isHashPrecomputed, int bucketCount);
+        public abstract BucketFunction createBucketFunction(List<Type> partitionChannelTypes,
+                boolean isHashPrecomputed,
+                int bucketCount,
+                BlockTypeOperators blockTypeOperators);
 
         private static class SingleBucketFunction
                 implements BucketFunction

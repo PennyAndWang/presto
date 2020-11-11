@@ -23,6 +23,7 @@ import org.testng.annotations.Test;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.spi.StandardErrorCode.DIVISION_BY_ZERO;
 import static io.prestosql.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
+import static io.prestosql.spi.StandardErrorCode.TOO_MANY_ARGUMENTS;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DecimalType.createDecimalType;
@@ -238,8 +239,8 @@ public class TestMathFunctions
     public void testTruncate()
     {
         // DOUBLE
-        final String maxDouble = Double.toString(Double.MAX_VALUE);
-        final String minDouble = Double.toString(-Double.MAX_VALUE);
+        String maxDouble = Double.toString(Double.MAX_VALUE);
+        String minDouble = Double.toString(-Double.MAX_VALUE);
         assertFunction("truncate(17.18E0)", DOUBLE, 17.0);
         assertFunction("truncate(-17.18E0)", DOUBLE, -17.0);
         assertFunction("truncate(17.88E0)", DOUBLE, 17.0);
@@ -687,11 +688,39 @@ public class TestMathFunctions
         functionAssertions.tryEvaluateWithAll("rand()", DOUBLE, TEST_SESSION);
         functionAssertions.tryEvaluateWithAll("random()", DOUBLE, TEST_SESSION);
         functionAssertions.tryEvaluateWithAll("rand(1000)", INTEGER, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(TINYINT '3', TINYINT '5')", TINYINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(TINYINT '-3', TINYINT '-1')", TINYINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(TINYINT '-3', TINYINT '5')", TINYINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(SMALLINT '20000', SMALLINT '30000')", SMALLINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(SMALLINT '-20000', SMALLINT '-10000')", SMALLINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(SMALLINT '-20000', SMALLINT '30000')", SMALLINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(1000, 2000)", INTEGER, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(-10, -5)", INTEGER, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(-10, 10)", INTEGER, TEST_SESSION);
         functionAssertions.tryEvaluateWithAll("random(2000)", INTEGER, TEST_SESSION);
         functionAssertions.tryEvaluateWithAll("random(3000000000)", BIGINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(3000000000, 5000000000)", BIGINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(-3000000000, -2000000000)", BIGINT, TEST_SESSION);
+        functionAssertions.tryEvaluateWithAll("random(-3000000000, 5000000000)", BIGINT, TEST_SESSION);
 
         assertInvalidFunction("rand(-1)", "bound must be positive");
         assertInvalidFunction("rand(-3000000000)", "bound must be positive");
+        assertInvalidFunction("random(TINYINT '5', TINYINT '3')", "start value must be less than stop value");
+        assertInvalidFunction("random(TINYINT '5', TINYINT '5')", "start value must be less than stop value");
+        assertInvalidFunction("random(TINYINT '-5', TINYINT '-10')", "start value must be less than stop value");
+        assertInvalidFunction("random(TINYINT '-5', TINYINT '-5')", "start value must be less than stop value");
+        assertInvalidFunction("random(SMALLINT '30000', SMALLINT '10000')", "start value must be less than stop value");
+        assertInvalidFunction("random(SMALLINT '30000', SMALLINT '30000')", "start value must be less than stop value");
+        assertInvalidFunction("random(SMALLINT '-30000', SMALLINT '-31000')", "start value must be less than stop value");
+        assertInvalidFunction("random(SMALLINT '-30000', SMALLINT '-30000')", "start value must be less than stop value");
+        assertInvalidFunction("random(1000, 500)", "start value must be less than stop value");
+        assertInvalidFunction("random(500, 500)", "start value must be less than stop value");
+        assertInvalidFunction("random(-500, -600)", "start value must be less than stop value");
+        assertInvalidFunction("random(-500, -500)", "start value must be less than stop value");
+        assertInvalidFunction("random(3000000000, 1000000000)", "start value must be less than stop value");
+        assertInvalidFunction("random(3000000000, 3000000000)", "start value must be less than stop value");
+        assertInvalidFunction("random(-3000000000, -4000000000)", "start value must be less than stop value");
+        assertInvalidFunction("random(-3000000000, -3000000000)", "start value must be less than stop value");
     }
 
     @Test
@@ -793,6 +822,60 @@ public class TestMathFunctions
         assertFunction("round(REAL '-3.5', 1)", REAL, -3.5f);
         assertFunction("round(REAL '-3.5001', 1)", REAL, -3.5f);
         assertFunction("round(REAL '-3.99', 1)", REAL, -4.0f);
+
+        // ROUND negative DECIMAL
+        assertFunction("round(TINYINT '9', -1)", TINYINT, (byte) 10);
+        assertFunction("round(TINYINT '-9', -1)", TINYINT, (byte) -10);
+        assertFunction("round(TINYINT '5', -1)", TINYINT, (byte) 10);
+        assertFunction("round(TINYINT '-5', -1)", TINYINT, (byte) -10);
+        assertFunction("round(TINYINT '-14', -1)", TINYINT, (byte) -10);
+        assertFunction("round(TINYINT '12', -1)", TINYINT, (byte) 10);
+        assertFunction("round(TINYINT '18', -1)", TINYINT, (byte) 20);
+        assertFunction("round(TINYINT '18', -2)", TINYINT, (byte) 0);
+        assertFunction("round(TINYINT '18', -3)", TINYINT, (byte) 0);
+        assertFunction("round(TINYINT '127', -2)", TINYINT, (byte) 100);
+        assertFunction("round(TINYINT '127', -3)", TINYINT, (byte) 0);
+        assertFunction("round(TINYINT '-128', -2)", TINYINT, (byte) -100);
+        assertFunction("round(TINYINT '-128', -3)", TINYINT, (byte) 0);
+        assertFunction("round(SMALLINT '99', -1)", SMALLINT, (short) 100);
+        assertFunction("round(SMALLINT '99', -2)", SMALLINT, (short) 100);
+        assertFunction("round(SMALLINT '99', -3)", SMALLINT, (short) 0);
+        assertFunction("round(SMALLINT '-99', -1)", SMALLINT, (short) -100);
+        assertFunction("round(SMALLINT '-99', -2)", SMALLINT, (short) -100);
+        assertFunction("round(SMALLINT '-99', -3)", SMALLINT, (short) 0);
+        assertFunction("round(SMALLINT '32767', -4)", SMALLINT, (short) 30000);
+        assertFunction("round(SMALLINT '32767', -5)", SMALLINT, (short) 0);
+        assertFunction("round(SMALLINT '-32768', -4)", SMALLINT, (short) -30000);
+        assertFunction("round(SMALLINT '-32768', -5)", SMALLINT, (short) 0);
+        assertFunction("round(99, -1)", INTEGER, 100);
+        assertFunction("round(-99, -1)", INTEGER, -100);
+        assertFunction("round(99, INTEGER '-1')", INTEGER, 100);
+        assertFunction("round(-99, INTEGER '-1')", INTEGER, -100);
+        assertFunction("round(12355, -2)", INTEGER, 12400);
+        assertFunction("round(12345, -2)", INTEGER, 12300);
+        assertFunction("round(2147483647, -9)", INTEGER, 2000000000);
+        assertFunction("round(2147483647, -10)", INTEGER, 0);
+        assertFunction("round( 3999999999, -1)", BIGINT, 4000000000L);
+        assertFunction("round(-3999999999, -1)", BIGINT, -4000000000L);
+        assertFunction("round(9223372036854775807, -2)", BIGINT, 9223372036854775800L);
+        assertFunction("round(9223372036854775807, -17)", BIGINT, 9200000000000000000L);
+        assertFunction("round(9223372036854775807, -18)", BIGINT, 9000000000000000000L);
+        assertFunction("round(-9223372036854775807, -17)", BIGINT, -9200000000000000000L);
+        assertFunction("round(-9223372036854775807, -18)", BIGINT, -9000000000000000000L);
+
+        assertInvalidFunction("round(TINYINT '127', -1)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(TINYINT '-128', -1)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(SMALLINT '32767', -1)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(SMALLINT '32767', -3)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(SMALLINT '-32768', -1)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(SMALLINT '-32768', -3)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(2147483647, -100)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(2147483647, -2147483648)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(9223372036854775807, -1)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(9223372036854775807, -3)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(9223372036854775807, -19)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(-9223372036854775807, -20)", NUMERIC_VALUE_OUT_OF_RANGE);
+        assertInvalidFunction("round(-9223372036854775807, -2147483648)", NUMERIC_VALUE_OUT_OF_RANGE);
 
         // ROUND short DECIMAL -> short DECIMAL
         assertFunction("round(DECIMAL '0')", createDecimalType(1, 0), SqlDecimal.of("0"));
@@ -1086,15 +1169,25 @@ public class TestMathFunctions
         assertFunction("greatest(1.5E0, 2.3E0)", DOUBLE, 2.3);
         assertFunction("greatest(-1.5E0, -2.3E0)", DOUBLE, -1.5);
         assertFunction("greatest(-1.5E0, -2.3E0, -5/3)", DOUBLE, -1.0);
-        assertFunction("greatest(1.5E0, -1.0E0 / 0.0E0, 1.0E0 / 0.0E0)", DOUBLE, Double.POSITIVE_INFINITY);
+        assertFunction("greatest(1.5E0, -infinity(), infinity())", DOUBLE, Double.POSITIVE_INFINITY);
         assertFunction("greatest(5, 4, CAST(NULL as DOUBLE), 3)", DOUBLE, null);
+        assertFunction("greatest(NaN(), 5, 4, 3)", DOUBLE, 5.0);
+        assertFunction("greatest(5, 4, NaN(), 3)", DOUBLE, 5.0);
+        assertFunction("greatest(5, 4, 3, NaN())", DOUBLE, 5.0);
+        assertFunction("greatest(NaN())", DOUBLE, Double.NaN);
+        assertFunction("greatest(NaN(), NaN(), NaN())", DOUBLE, Double.NaN);
 
-        // float
-        assertFunction("greatest(REAL '1.5', 2.3E0)", DOUBLE, 2.3);
-        assertFunction("greatest(REAL '-1.5', -2.3E0)", DOUBLE, (double) -1.5f);
-        assertFunction("greatest(-1.5E0, REAL '-2.3', -5/3)", DOUBLE, -1.0);
-        assertFunction("greatest(REAL '1.5', REAL '-1.0' / 0.0E0, 1.0E0 / REAL '0.0')", DOUBLE, (double) (1.0f / 0.0f));
-        assertFunction("greatest(5, REAL '4', CAST(NULL as DOUBLE), 3)", DOUBLE, null);
+        // real
+        assertFunction("greatest(REAL '1.5', REAL '2.3')", REAL, 2.3f);
+        assertFunction("greatest(REAL '-1.5', REAL '-2.3')", REAL, -1.5f);
+        assertFunction("greatest(REAL '-1.5', REAL '-2.3', CAST(-5/3 AS REAL))", REAL, -1.0f);
+        assertFunction("greatest(REAL '1.5', CAST(infinity() AS REAL))", REAL, Float.POSITIVE_INFINITY);
+        assertFunction("greatest(REAL '5', REAL '4', CAST(NULL as REAL), REAL '3')", REAL, null);
+        assertFunction("greatest(CAST(NaN() as REAL), REAL '5', REAL '4', REAL '3')", REAL, 5.0f);
+        assertFunction("greatest(REAL '5', REAL '4', CAST(NaN() as REAL), REAL '3')", REAL, 5.0f);
+        assertFunction("greatest(REAL '5', REAL '4', REAL '3', CAST(NaN() as REAL))", REAL, 5.0f);
+        assertFunction("greatest(CAST(NaN() as REAL))", REAL, Float.NaN);
+        assertFunction("greatest(CAST(NaN() as REAL), CAST(NaN() as REAL), CAST(NaN() as REAL))", REAL, Float.NaN);
 
         // decimal
         assertDecimalFunction("greatest(1.0, 2.0)", decimal("2.0"));
@@ -1112,14 +1205,12 @@ public class TestMathFunctions
         assertFunction("greatest(1.0, 2.0E0)", DOUBLE, 2.0);
         assertDecimalFunction("greatest(5, 4, 3.0, 2)", decimal("0000000005.0"));
 
-        // invalid
-        assertInvalidFunction("greatest(1.5E0, 0.0E0 / 0.0E0)", "Invalid argument to greatest(): NaN");
-
         // argument count limit
         tryEvaluateWithAll("greatest(" + Joiner.on(", ").join(nCopies(127, "rand()")) + ")", DOUBLE);
-        assertNotSupported(
+        assertInvalidFunction(
                 "greatest(" + Joiner.on(", ").join(nCopies(128, "rand()")) + ")",
-                "Too many arguments for function call greatest()");
+                TOO_MANY_ARGUMENTS,
+                "line 1:1: Too many arguments for function call greatest()");
     }
 
     @Test
@@ -1157,15 +1248,25 @@ public class TestMathFunctions
         assertFunction("least(1.5E0, 2.3E0)", DOUBLE, 1.5);
         assertFunction("least(-1.5E0, -2.3E0)", DOUBLE, -2.3);
         assertFunction("least(-1.5E0, -2.3E0, -5/3)", DOUBLE, -2.3);
-        assertFunction("least(1.5E0, -1.0E0 / 0.0E0, 1.0E0 / 0.0E0)", DOUBLE, Double.NEGATIVE_INFINITY);
+        assertFunction("least(1.5E0, -infinity(), infinity())", DOUBLE, Double.NEGATIVE_INFINITY);
         assertFunction("least(5, 4, CAST(NULL as DOUBLE), 3)", DOUBLE, null);
+        assertFunction("least(NaN(), 5, 4, 3)", DOUBLE, 3.0);
+        assertFunction("least(5, 4, NaN(), 3)", DOUBLE, 3.0);
+        assertFunction("least(5, 4, 3, NaN())", DOUBLE, 3.0);
+        assertFunction("least(NaN())", DOUBLE, Double.NaN);
+        assertFunction("least(NaN(), NaN(), NaN())", DOUBLE, Double.NaN);
 
-        // float
-        assertFunction("least(REAL '1.5', 2.3E0)", DOUBLE, (double) 1.5f);
-        assertFunction("least(REAL '-1.5', -2.3E0)", DOUBLE, -2.3);
-        assertFunction("least(-2.3E0, REAL '-0.4', -5/3)", DOUBLE, -2.3);
-        assertFunction("least(1.5E0, REAL '-1.0' / 0.0E0, 1.0E0 / 0.0E0)", DOUBLE, (double) (-1.0f / 0.0f));
-        assertFunction("least(REAL '5', 4, CAST(NULL as DOUBLE), 3)", DOUBLE, null);
+        // real
+        assertFunction("least(REAL '1.5', REAL '2.3')", REAL, 1.5f);
+        assertFunction("least(REAL '-1.5', REAL '-2.3')", REAL, -2.3f);
+        assertFunction("least(REAL '-1.5', REAL '-2.3', CAST(-5/3 AS REAL))", REAL, -2.3f);
+        assertFunction("least(REAL '1.5', CAST(-infinity() AS REAL))", REAL, Float.NEGATIVE_INFINITY);
+        assertFunction("least(REAL '5', REAL '4', CAST(NULL as REAL), REAL '3')", REAL, null);
+        assertFunction("least(CAST(NaN() as REAL), REAL '5', REAL '4', REAL '3')", REAL, 3.0f);
+        assertFunction("least(REAL '5', REAL '4', CAST(NaN() as REAL), REAL '3')", REAL, 3.0f);
+        assertFunction("least(REAL '5', REAL '4', REAL '3', CAST(NaN() as REAL))", REAL, 3.0f);
+        assertFunction("least(CAST(NaN() as REAL))", REAL, Float.NaN);
+        assertFunction("least(CAST(NaN() as REAL), CAST(NaN() as REAL), CAST(NaN() as REAL))", REAL, Float.NaN);
 
         // decimal
         assertDecimalFunction("least(1.0, 2.0)", decimal("1.0"));
@@ -1182,16 +1283,6 @@ public class TestMathFunctions
         assertFunction("least(5.0E0, 4, CAST(NULL as BIGINT), 3)", DOUBLE, null);
         assertFunction("least(1.0, 2.0E0)", DOUBLE, 1.0);
         assertDecimalFunction("least(5, 4, 3.0, 2)", decimal("0000000002.0"));
-
-        // invalid
-        assertInvalidFunction("least(1.5E0, 0.0E0 / 0.0E0)", "Invalid argument to least(): NaN");
-    }
-
-    @Test(expectedExceptions = PrestoException.class, expectedExceptionsMessageRegExp = "\\QInvalid argument to greatest(): NaN\\E")
-    public void testGreatestWithNaN()
-    {
-        functionAssertions.tryEvaluate("greatest(1.5E0, 0.0E0 / 0.0E0)", DOUBLE);
-        functionAssertions.tryEvaluate("greatest(1.5E0, REAL '0.0' / REAL '0.0')", DOUBLE);
     }
 
     @Test
@@ -1327,7 +1418,6 @@ public class TestMathFunctions
 
     @Test
     public void testNormalCdf()
-            throws Exception
     {
         assertFunction("normal_cdf(0, 1, 1.96)", DOUBLE, 0.9750021048517796);
         assertFunction("normal_cdf(10, 9, 10)", DOUBLE, 0.5);
@@ -1360,7 +1450,6 @@ public class TestMathFunctions
 
     @Test
     public void testBetaCdf()
-            throws Exception
     {
         assertFunction("beta_cdf(3, 3.6, 0.0)", DOUBLE, 0.0);
         assertFunction("beta_cdf(3, 3.6, 1.0)", DOUBLE, 1.0);

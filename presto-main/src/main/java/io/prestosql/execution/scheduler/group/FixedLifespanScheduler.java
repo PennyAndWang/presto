@@ -81,6 +81,7 @@ public class FixedLifespanScheduler
         this.concurrentLifespansPerTask = requireNonNull(concurrentLifespansPerTask, "concurrentLifespansPerTask is null");
     }
 
+    @Override
     public void scheduleInitial(SourceScheduler scheduler)
     {
         checkState(!initialScheduled);
@@ -107,6 +108,7 @@ public class FixedLifespanScheduler
         }
     }
 
+    @Override
     public void onLifespanFinished(Iterable<Lifespan> newlyCompletedDriverGroups)
     {
         checkState(initialScheduled);
@@ -122,7 +124,8 @@ public class FixedLifespanScheduler
         newDriverGroupReady.set(null);
     }
 
-    public SettableFuture schedule(SourceScheduler scheduler)
+    @Override
+    public SettableFuture<?> schedule(SourceScheduler scheduler)
     {
         // Return a new future even if newDriverGroupReady has not finished.
         // Returning the same SettableFuture instance could lead to ListenableFuture retaining too many listener objects.

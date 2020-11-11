@@ -2,20 +2,15 @@
 Elasticsearch Connector
 =======================
 
-.. contents::
-    :local:
-    :backlinks: none
-    :depth: 1
-
 Overview
 --------
 
-The Elasticsearch Connector allows access to Elasticsearch data from Presto.
+The Elasticsearch Connector allows access to `Elasticsearch <https://www.elastic.co/products/elasticsearch>`_ data from Presto.
 This document describes how to setup the Elasticsearch Connector to run SQL queries against Elasticsearch.
 
 .. note::
 
-    It is highly recommended to use Elasticsearch 6.0.0 or later.
+    Elasticsearch 6.0.0 or later is required.
 
 Configuration
 -------------
@@ -27,47 +22,36 @@ replacing the properties as appropriate:
 .. code-block:: none
 
     connector.name=elasticsearch
+    elasticsearch.host=localhost
+    elasticsearch.port=9200
     elasticsearch.default-schema-name=default
-    elasticsearch.table-description-directory=etc/elasticsearch/
-    elasticsearch.scroll-size=1000
-    elasticsearch.scroll-timeout=1m
-    elasticsearch.request-timeout=2s
-    elasticsearch.max-request-retries=5
-    elasticsearch.max-request-retry-time=10s
 
 Configuration Properties
 ------------------------
 
 The following configuration properties are available:
 
-============================================= ==============================================================================
-Property Name                                 Description
-============================================= ==============================================================================
-``elasticsearch.default-schema-name``         Default schema name for tables.
-``elasticsearch.table-description-directory`` Directory containing JSON table description files.
-``elasticsearch.scroll-size``                 Maximum number of hits to be returned with each Elasticsearch scroll request.
-``elasticsearch.scroll-timeout``              Timeout for keeping the search context alive for scroll requests.
-``elasticsearch.max-hits``                    Maximum number of hits a single Elasticsearch request can fetch.
-``elasticsearch.request-timeout``             Timeout for Elasticsearch requests.
-``elasticsearch.max-request-retries``         Maximum number of Elasticsearch request retries.
-``elasticsearch.max-request-retry-time``      Use exponential backoff starting at 1s up to the value specified by this configuration when retrying failed requests.
-============================================= ==============================================================================
+``elasticsearch.host``
+^^^^^^^^^^^^^^^^^^^^^^
+
+Hostname of the Elasticsearch node to connect to.
+
+This property is required.
+
+``elasticsearch.port``
+^^^^^^^^^^^^^^^^^^^^^^
+
+Specifies the port of the Elasticsearch node to connect to.
+
+This property is optional; the default is ``9200``.
 
 ``elasticsearch.default-schema-name``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Defines the schema that will contain all tables defined without
+Defines the schema that contains all tables defined without
 a qualifying schema name.
 
 This property is optional; the default is ``default``.
-
-``elasticsearch.table-description-directory``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Specifies a path under the Presto deployment directory that contains
-one or more JSON files with table descriptions (must end with ``.json``).
-
-This property is optional; the default is ``etc/elasticsearch``.
 
 ``elasticsearch.scroll-size``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,194 +64,228 @@ This property is optional; the default is ``1000``.
 ``elasticsearch.scroll-timeout``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This property defines the amount of time (ms) Elasticsearch will keep the `search context alive`_ for scroll requests
+This property defines the amount of time (ms) Elasticsearch keeps the `search context alive`_ for scroll requests
 
-This property is optional; the default is ``1s``.
+This property is optional; the default is ``1m``.
 
 .. _search context alive: https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context
-
-``elasticsearch.max-hits``
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the maximum number of `hits`_ an Elasticsearch request can fetch.
-
-This property is optional; the default is ``1000``.
-
-.. _hits: https://www.elastic.co/guide/en/elasticsearch/reference/current/search.html
 
 ``elasticsearch.request-timeout``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This property defines the timeout value for all Elasticsearch requests.
 
-This property is optional; the default is ``100ms``.
-
-``elasticsearch.max-request-retries``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the maximum number of Elasticsearch request retries.
-
-This property is optional; the default is ``5``.
-
-``elasticsearch.max-request-retry-time``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Use exponential backoff starting at 1s up to the value specified by this configuration when retrying failed requests.
-
 This property is optional; the default is ``10s``.
 
-Search Guard Authentication
----------------------------
+``elasticsearch.connect-timeout``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Elasticsearch connector provides additional security options to support Elasticsearch clusters that have been configured to use Search Guard.
+This property defines the timeout value for all Elasticsearch connection attempts.
 
-You can configure the certificate format by setting the ``searchguard.ssl.certificate_format`` config property in the Elasticsearch catalog properties file. The allowed values for this configuration are:
+This property is optional; the default is ``1s``.
 
-========================== ========================================================
-Property Value	           Description
-========================== ========================================================
-``NONE`` (default)         Do not use Search Guard Authentication.
-``PEM``                    Use X.509 PEM certificates and PKCS #8 keys.
-``JKS``                    Use Keystore and Truststore files.
-========================== ========================================================
+``elasticsearch.max-retry-time``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you use X.509 PEM certificates and PKCS #8 keys, the following properties must be set:
+This property defines the maximum duration across all retry attempts for a single request to Elasticsearch.
 
-===================================================== ==============================================================================
-Property Name                                         Description
-===================================================== ==============================================================================
-``searchguard.ssl.pemcert-filepath``                  Path to the X.509 node certificate chain.
-``searchguard.ssl.pemkey-filepath``                   Path to the certificates key file.
-``searchguard.ssl.pemkey-password``                   Key password. Omit this setting if the key has no password.
-``searchguard.ssl.pemtrustedcas-filepath``            Path to the root CA(s) (PEM format).
-===================================================== ==============================================================================
+This property is optional; the default is ``20s``.
 
-If you use Keystore and Truststore files, the following properties must be set:
+``elasticsearch.node-refresh-interval``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-===================================================== ==============================================================================
-Property Name                                         Description
-===================================================== ==============================================================================
-``searchguard.ssl.keystore-filepath``                 Path to the keystore file.
-``searchguard.ssl.keystore-password``                 Keystore password.
-``searchguard.ssl.truststore-filepath``               Path to the truststore file.
-``searchguard.ssl.truststore-password``               Truststore password.
-===================================================== ==============================================================================
+This property controls how often the list of available Elasticsearch nodes is refreshed.
 
-``searchguard.ssl.pemcert-filepath``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+This property is optional; the default is ``1m``.
 
-The path to the X.509 node certificate chain. This file must be readable by the operating system user running Presto.
+``elasticsearch.ignore-publish-address``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This property is optional; the default is ``etc/elasticsearch/esnode.pem``.
+Enable or disable using the address published by Elasticsearch to connect for
+queries.
 
-``searchguard.ssl.pemkey-filepath``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``elasticsearch.security``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The path to the certificates key file. This file must be readable by the operating system user running Presto.
+Allows setting ``password`` security to authenticate to Elasticsearch.
 
-This property is optional; the default is ``etc/elasticsearch/esnode-key.pem``.
+``elasticsearch.auth.user``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``searchguard.ssl.pemkey-password``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+User name to use to authenticate to Elasticsearch nodes.
 
-The key password for the key file specified by ``searchguard.ssl.pemkey-filepath``.
+``elasticsearch.auth.password``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This property is optional; the default is empty string.
+Password to use to authenticate to Elasticsearch nodes.
 
-``searchguard.ssl.pemtrustedcas-filepath``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TLS Security
+------------
 
-The path to the root CA(s) (PEM format). This file must be readable by the operating system user running Presto.
+The Elasticsearch connector provides additional security options to support Elasticsearch clusters that have been configured to use TLS.
 
-This property is optional; the default is ``etc/elasticsearch/root-ca.pem``.
+The connector supports key stores and trust stores in PEM or Java Key Store (JKS) format. The allowed configuration values are:
 
-``searchguard.ssl.keystore-filepath``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``elasticsearch.tls.keystore-path``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The path to the keystore file. This file must be readable by the operating system user running Presto.
+The path to the PEM or JKS key store. This file must be readable by the operating system user running Presto.
 
-This property is optional; the default is ``etc/elasticsearch/keystore.jks``.
+This property is optional.
 
-``searchguard.ssl.keystore-password``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``elasticsearch.tls.truststore-path``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The keystore password for the keystore file specified by ``searchguard.ssl.keystore-filepath``
+The path to PEM or JKS trust store. This file must be readable by the operating system user running Presto.
 
-This property is optional; the default is empty string.
+This property is optional.
 
-``searchguard.ssl.truststore-filepath``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``elasticsearch.tls.keystore-password``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The path to the truststore file. This file must be readable by the operating system user running Presto.
+The key password for the key store specified by ``elasticsearch.tls.keystore-path``.
 
-This property is optional; the default is ``etc/elasticsearch/truststore.jks``.
+This property is optional.
 
-``searchguard.ssl.truststore-password``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``elasticsearch.tls.truststore-password``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The truststore password for the truststore file specified by ``searchguard.ssl.truststore-password``
+The key password for the trust store specified by ``elasticsearch.tls.truststore-path``.
 
-This property is optional; the default is empty string.
+This property is optional.
 
-Table Definition Files
-----------------------
+Data Types
+----------
 
-Elasticsearch stores the data across multiple nodes and builds indices for fast retrieval.
-For Presto, this data must be mapped into columns to allow queries against the data.
+The data type mappings are as follows:
 
-A table definition file describes a table in JSON format.
+============= =============
+Elasticsearch Presto
+============= =============
+``binary``    ``VARBINARY``
+``boolean``   ``BOOLEAN``
+``double``    ``DOUBLE``
+``float``     ``REAL``
+``byte``      ``TINYINT``
+``short``     ``SMALLINT``
+``integer``   ``INTEGER``
+``long``      ``BIGINT``
+``keyword``   ``VARCHAR``
+``text``      ``VARCHAR``
+``date``      ``TIMESTAMP``
+``ip``        ``IPADDRESS``
+(all others)  (unsupported)
+============= =============
 
-.. code-block:: none
+.. _elasticsearch-array-types:
+
+Array Types
+^^^^^^^^^^^
+
+Fields in Elasticsearch can contain `zero or more values <https://www.elastic.co/guide/en/elasticsearch/reference/current/array.html>`_
+, but there is no dedicated array type. To indicate a field contains an array, it can be annotated in a Presto-specific structure in
+the `_meta <https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-meta-field.html>`_ section of the index mapping.
+
+For example, you can have an Elasticsearch index that contains documents with the following structure:
+
+.. code-block:: json
 
     {
-        "tableName": ...,
-        "schemaName": ...,
-        "hostAddress": ...,
-        "port": ...,
-        "clusterName": ...,
-        "index": ...,
-        "indexExactMatch": ...,
-        "type": ...
-        "columns": [
-            {
-                "name": ...,
-                "type": ...,
-                "jsonPath": ...,
-                "jsonType": ...,
-                "ordinalPosition": ...
-            }
-        ]
+        "array_string_field": ["presto","is","the","besto"],
+        "long_field": 314159265359,
+        "id_field": "564e6982-88ee-4498-aa98-df9e3f6b6109",
+        "timestamp_field": "1987-09-17T06:22:48.000Z",
+        "object_field": {
+            "array_int_field": [86,75,309],
+            "int_field": 2
+        }
     }
 
-=================== ========= ============== =============================
-Field               Required  Type           Description
-=================== ========= ============== =============================
-``tableName``       required  string         Name of the table.
-``schemaName``      optional  string         Schema that contains the table. If omitted, the default schema name is used.
-``host``            required  string         Elasticsearch search node host name.
-``port``            required  integer        Elasticsearch search node port number.
-``clusterName``     required  string         Elasticsearch cluster name.
-``index``           required  string         Elasticsearch index that is backing this table.
-``indexExactMatch`` optional  boolean        If set to true, the index specified with the ``index`` property is used. Otherwise, all indices starting with the prefix specified by the ``index`` property are used.
-``type``            required  string         Elasticsearch `mapping type`_, which determines how the document are indexed.
-``columns``         optional  list           List of column metadata information.
-=================== ========= ============== =============================
+The array fields of this structure can be defined by using the following command to add the field
+property definition to the ``_meta.presto`` property of the target index mapping.
 
-.. _mapping type: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping.html#mapping-type
+.. code-block:: shell
 
-Elasticsearch Column Metadata
------------------------------
+    curl --request PUT \
+        --url localhost:9200/doc/_mapping \
+        --header 'content-type: application/json' \
+        --data '
+    {
+        "_meta": {
+            "presto":{
+                "array_string_field":{
+                    "isArray":true
+                },
+                "object_field":{
+                    "array_int_field":{
+                        "isArray":true
+                    }
+                },
+            }
+        }
+    }'
 
-Optionally, column metadata can be described in the same table description JSON file with these fields:
+Special Columns
+---------------
 
-===================== ========= ============== =============================
-Field                 Required  Type           Description
-===================== ========= ============== =============================
-``name``              optional  string         Column name of Elasticsearch field.
-``type``              optional  string         Column type of Elasticsearch `field`_.
-``jsonPath``          optional  string         Json path of Elasticsearch field.
-``jsonType``          optional  string         Json type of Elasticsearch field.
-``ordinalPosition``   optional  integer        Ordinal position of the column.
-===================== ========= ============== =============================
+The following hidden columns are available:
 
-.. _field: https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping-types.html
+======= =======================================================
+Column  Description
+======= =======================================================
+_id     The Elasticsearch document ID
+_score  The document score returned by the Elasticsearch query
+_source The source of the original document
+======= =======================================================
+
+.. _elasticsearch-full-text-queries:
+
+Full Text Queries
+-----------------
+
+Presto SQL queries can be combined with Elasticsearch queries by providing the `full text query`_
+as part of the table name, separated by a colon. For example:
+
+.. code-block:: sql
+
+    SELECT * FROM "tweets: +presto SQL^2"
+
+.. _full text query: https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html#query-string-syntax
+
+
+Pass-through Queries
+--------------------
+
+The Elasticsearch connector allows you to embed any valid Elasticsearch query,
+that uses the `Elasticsearch Query DSL
+<https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html>`_
+in your SQL query.
+
+The results can then be used in any SQL statement, wrapping the Elasticsearch
+query. The syntax extends the syntax of the enhanced Elasticsearch table names
+with the following::
+
+    SELECT * FROM es.default."<index>$query:<es-query>"
+
+The Elasticsearch query string ``es-query`` is base32-encoded to avoid having to
+deal with escaping quotes and case sensitivity issues in table identifiers.
+
+The result of these query tables is a table with a single row and a single
+column named ``result`` of type VARCHAR. It contains the JSON payload returned
+by Elasticsearch, and can be processed with the :doc:`built-in JSON functions
+</functions/json>`.
+
+AWS Authorization
+-----------------
+
+To enable AWS authorization using IAM policies, the ``elasticsearch.security`` option needs to be set to ``AWS``.
+Additionally, the following options need to be configured appropriately:
+
+================================================ ==================================================================
+Property Name                                    Description
+================================================ ==================================================================
+``elasticsearch.aws.region``                     AWS region or the Elasticsearch endpoint. This option is required.
+``elasticsearch.aws.access-key``                 AWS access key to use to connect to the Elasticsearch domain.
+``elasticsearch.aws.secret-key``                 AWS secret key to use to connect to the Elasticsearch domain.
+================================================ ==================================================================
+

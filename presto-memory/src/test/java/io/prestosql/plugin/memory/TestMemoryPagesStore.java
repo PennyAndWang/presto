@@ -23,14 +23,14 @@ import io.prestosql.spi.block.BlockBuilder;
 import io.prestosql.spi.connector.ConnectorInsertTableHandle;
 import io.prestosql.spi.connector.ConnectorOutputTableHandle;
 import io.prestosql.spi.connector.ConnectorPageSink;
-import io.prestosql.spi.connector.ConnectorSession;
-import io.prestosql.testing.TestingConnectorSession;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
 import static io.prestosql.spi.type.BigintType.BIGINT;
+import static io.prestosql.testing.TestingConnectorSession.SESSION;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
@@ -38,7 +38,6 @@ import static org.testng.Assert.assertTrue;
 @Test(singleThreaded = true)
 public class TestMemoryPagesStore
 {
-    public static final ConnectorSession SESSION = new TestingConnectorSession(ImmutableList.of());
     private static final int POSITIONS_PER_PAGE = 0;
 
     private MemoryPagesStore pagesStore;
@@ -47,7 +46,7 @@ public class TestMemoryPagesStore
     @BeforeMethod
     public void setUp()
     {
-        pagesStore = new MemoryPagesStore(new MemoryConfig().setMaxDataPerNode(new DataSize(1, DataSize.Unit.MEGABYTE)));
+        pagesStore = new MemoryPagesStore(new MemoryConfig().setMaxDataPerNode(DataSize.of(1, DataSize.Unit.MEGABYTE)));
         pageSinkProvider = new MemoryPageSinkProvider(pagesStore, HostAddress.fromString("localhost:8080"));
     }
 
@@ -55,7 +54,7 @@ public class TestMemoryPagesStore
     public void testCreateEmptyTable()
     {
         createTable(0L, 0L);
-        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty()), ImmutableList.of());
+        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty(), OptionalDouble.empty()), ImmutableList.of());
     }
 
     @Test
@@ -63,28 +62,28 @@ public class TestMemoryPagesStore
     {
         createTable(0L, 0L);
         insertToTable(0L, 0L);
-        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), POSITIONS_PER_PAGE, OptionalLong.empty()).size(), 1);
+        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), POSITIONS_PER_PAGE, OptionalLong.empty(), OptionalDouble.empty()).size(), 1);
     }
 
     @Test
     public void testInsertPageWithoutCreate()
     {
         insertToTable(0L, 0L);
-        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), POSITIONS_PER_PAGE, OptionalLong.empty()).size(), 1);
+        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), POSITIONS_PER_PAGE, OptionalLong.empty(), OptionalDouble.empty()).size(), 1);
     }
 
     @Test(expectedExceptions = PrestoException.class)
     public void testReadFromUnknownTable()
     {
-        pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty());
+        pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty(), OptionalDouble.empty());
     }
 
     @Test(expectedExceptions = PrestoException.class)
     public void testTryToReadFromEmptyTable()
     {
         createTable(0L, 0L);
-        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty()), ImmutableList.of());
-        pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 42, OptionalLong.empty());
+        assertEquals(pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 0, OptionalLong.empty(), OptionalDouble.empty()), ImmutableList.of());
+        pagesStore.getPages(0L, 0, 1, ImmutableList.of(0), 42, OptionalLong.empty(), OptionalDouble.empty());
     }
 
     @Test
